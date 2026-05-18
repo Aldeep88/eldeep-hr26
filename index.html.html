@@ -1,0 +1,2968 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>نظام الحضور والانصراف</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <!-- Firebase SDK via compat -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Cairo', Arial, sans-serif; direction: rtl; }
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap');
+  </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+// ══════════════════════════════════════════════
+//  FIREBASE INIT (داخل Babel عشان يشتغل صح)
+// ══════════════════════════════════════════════
+(function initFirebase() {
+  if (window.__fsdb) return;
+  try {
+    const firebaseConfig = {
+      apiKey: "AIzaSyC8YH6JKavVDbJyXkka4oeg4Uan8IwYIfA",
+      authDomain: "pharmacy-hr-c8be0.firebaseapp.com",
+      projectId: "pharmacy-hr-c8be0",
+      storageBucket: "pharmacy-hr-c8be0.firebasestorage.app",
+      messagingSenderId: "358960386819",
+      appId: "1:358960386819:web:81dca8ac30583378f08f36"
+    };
+    if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+    db.enablePersistence().catch(() => {});
+    firebase.auth().signInAnonymously().catch(() => {});
+    window.__fsdb = db;
+  } catch(e) { console.error("Firebase init error:", e); }
+})();
+
+// ══════════════════════════════════════════════
+//  EXPORT HELPERS — PDF & EXCEL (ملونة واحترافية)
+// ══════════════════════════════════════════════
+const COLORS = {
+  navy:    [30,  58,  95],
+  blue:    [37, 99, 235],
+  green:   [22, 163, 74],
+  red:     [220, 38,  38],
+  orange:  [217,119,  6],
+  purple:  [124, 58, 237],
+  cyan:    [8,  145, 178],
+  white:   [255,255,255],
+  light:   [248,250,252],
+  altRow:  [239,246,255],
+  gray:    [100,116,139],
+  yellow:  [254,243,199],
+  rose:    [254,226,226],
+  mint:    [240,253,244],
+};
+
+function statusColor(status) {
+  if (status === "حاضر")    return { fill: COLORS.mint,   text: COLORS.green };
+  if (status === "متأخر")   return { fill: COLORS.yellow, text: COLORS.orange };
+  if (status === "غائب")    return { fill: COLORS.rose,   text: COLORS.red };
+  if (status === "إجازة")   return { fill: [224,242,254], text: COLORS.cyan };
+  if (status === "مأمورية") return { fill: [245,243,255], text: COLORS.purple };
+  return { fill: COLORS.light, text: COLORS.gray };
+}
+
+// ─── PDF (Print-based — يدعم العربية بشكل كامل) ────────────
+function exportPDF({ title, subtitle, columns, rows, summaryCards, filename, companyName, companyLogo }) {
+  const statusBadgeStyle = (status) => {
+    const map = {
+      "حاضر":    "background:#dcfce7;color:#16a34a;",
+      "متأخر":   "background:#fef9c3;color:#d97706;",
+      "غائب":    "background:#fee2e2;color:#dc2626;",
+      "إجازة":   "background:#e0f2fe;color:#0891b2;",
+      "مأمورية": "background:#f5f3ff;color:#7c3aed;",
+    };
+    return map[status] || "background:#f1f5f9;color:#64748b;";
+  };
+
+  const cardsHTML = summaryCards && summaryCards.length > 0
+    ? `<div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;">
+        ${summaryCards.map(c => {
+          const bg  = c.bg  ? `rgb(${c.bg.join(",")})` : "#f8fafc";
+          const col = c.color ? `rgb(${c.color.join(",")})` : "#1e3a5f";
+          const bdr = c.border ? `rgb(${c.border.join(",")})` : "#2563a8";
+          return `<div style="flex:1;min-width:100px;background:${bg};border:2px solid ${bdr};border-radius:10px;padding:12px 10px;text-align:center;">
+            <div style="font-size:22px;font-weight:900;color:${col};">${c.value}</div>
+            <div style="font-size:11px;color:#64748b;margin-top:3px;font-weight:700;">${c.label}</div>
+          </div>`;
+        }).join("")}
+      </div>` : "";
+
+  const tableRows = rows.map((r, i) => {
+    const bg = i % 2 === 0 ? "#f8fafc" : "#ffffff";
+    const cells = columns.map(c => {
+      const val = r[c.key] ?? "—";
+      if (c.key === "status") {
+        return `<td style="padding:8px 10px;text-align:center;"><span style="padding:3px 10px;border-radius:20px;font-size:12px;font-weight:700;${statusBadgeStyle(val)}">${val}</span></td>`;
+      }
+      if (c.key === "lateMinutes" && val && val !== "—" && parseInt(val) > 0) {
+        return `<td style="padding:8px 10px;text-align:center;color:#d97706;font-weight:700;">${val}</td>`;
+      }
+      return `<td style="padding:8px 10px;text-align:center;color:#374151;">${val}</td>`;
+    }).join("");
+    return `<tr style="background:${bg};">${cells}</tr>`;
+  }).join("");
+
+  const logoHTML = companyLogo
+    ? `<img src="${companyLogo}" style="height:48px;object-fit:contain;margin-left:12px;" />`
+    : `<span style="font-size:32px;">🏢</span>`;
+
+  const html = `<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8"/>
+<title>${title}</title>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet"/>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Cairo',Arial,sans-serif; direction:rtl; background:#fff; color:#1e293b; }
+  @media print {
+    body { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+    .no-print { display:none; }
+  }
+  table { width:100%; border-collapse:collapse; }
+  th { background:#1e3a5f; color:#fff; padding:10px 10px; font-size:12px; font-weight:700; }
+  td { border-bottom:1px solid #e2e8f0; }
+  tr:hover { background:#f0f9ff; }
+</style>
+</head>
+<body>
+<div style="max-width:960px;margin:0 auto;padding:20px;">
+  <!-- Header -->
+  <div style="background:linear-gradient(135deg,#1e3a5f,#2563a8);border-radius:14px;padding:20px 24px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
+    <div style="display:flex;align-items:center;gap:12px;">
+      ${logoHTML}
+      <div>
+        <div style="color:rgba(255,255,255,0.75);font-size:12px;margin-bottom:2px;">${companyName || "نظام الحضور والانصراف"}</div>
+        <div style="color:#fff;font-size:20px;font-weight:900;">${title}</div>
+        ${subtitle ? `<div style="color:rgba(255,255,255,0.8);font-size:12px;margin-top:4px;">${subtitle}</div>` : ""}
+      </div>
+    </div>
+    <div style="text-align:left;color:rgba(255,255,255,0.75);font-size:12px;">
+      <div>تاريخ الطباعة</div>
+      <div style="font-weight:700;font-size:14px;color:#fff;">${new Date().toLocaleDateString("ar-EG")}</div>
+    </div>
+  </div>
+
+  <!-- Summary Cards -->
+  ${cardsHTML}
+
+  <!-- Table -->
+  <div style="border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08);">
+    <table>
+      <thead><tr>${columns.map(c => `<th>${c.header}</th>`).join("")}</tr></thead>
+      <tbody>${tableRows}</tbody>
+    </table>
+  </div>
+
+  <!-- Footer -->
+  <div style="margin-top:16px;text-align:center;font-size:11px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:12px;">
+    ${companyName || "نظام الحضور والانصراف"} — جميع الحقوق محفوظة &nbsp;|&nbsp; ${new Date().toLocaleDateString("ar-EG")}
+  </div>
+
+  <div class="no-print" style="text-align:center;margin-top:20px;">
+    <button onclick="window.print()" style="padding:12px 32px;background:#1e3a5f;color:#fff;border:none;border-radius:10px;font-family:Cairo,Arial;font-size:16px;font-weight:700;cursor:pointer;">🖨️ طباعة / حفظ PDF</button>
+    <button onclick="window.close()" style="padding:12px 24px;background:#f1f5f9;color:#475569;border:none;border-radius:10px;font-family:Cairo,Arial;font-size:16px;font-weight:700;cursor:pointer;margin-right:10px;">✕ إغلاق</button>
+  </div>
+</div>
+</body>
+</html>`;
+
+  const win = window.open("", "_blank");
+  if (!win) { alert("يرجى السماح بالنوافذ المنبثقة في المتصفح ثم حاول مرة أخرى"); return; }
+  win.document.write(html);
+  win.document.close();
+}
+
+// ─── EXCEL ────────────────────────────────────
+function exportExcel({ title, subtitle, columns, rows, summaryCards, filename, sheetName, companyName }) {
+  const wb = XLSX.utils.book_new();
+  const ws_data = [];
+
+  // Title rows
+  ws_data.push([companyName || "نظام الحضور والانصراف"]);
+  ws_data.push([title]);
+  if (subtitle) ws_data.push([subtitle]);
+  ws_data.push([`تاريخ التصدير: ${new Date().toLocaleDateString("ar-EG")}`]);
+  ws_data.push([]);
+
+  // Summary cards row
+  if (summaryCards && summaryCards.length > 0) {
+    ws_data.push(summaryCards.map(c => `${c.label}: ${c.value}`));
+    ws_data.push([]);
+  }
+
+  // Headers
+  ws_data.push(columns.map(c => c.header));
+
+  // Data rows
+  rows.forEach(r => ws_data.push(columns.map(c => r[c.key] ?? "-")));
+
+  const ws = XLSX.utils.aoa_to_sheet(ws_data);
+
+  // Column widths
+  ws["!cols"] = columns.map(c => ({ wch: c.width || 18 }));
+
+  // Merge title cell across all columns
+  const totalCols = columns.length;
+  ws["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: totalCols - 1 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: totalCols - 1 } },
+  ];
+  if (subtitle) ws["!merges"].push({ s: { r: 2, c: 0 }, e: { r: 2, c: totalCols - 1 } });
+
+  // Cell styles helper
+  const styleCell = (addr, style) => {
+    if (!ws[addr]) ws[addr] = { t: "s", v: "" };
+    ws[addr].s = style;
+  };
+
+  // Title style
+  const titleStyle = { font: { bold: true, sz: 16, color: { rgb: "FFFFFF" } }, fill: { fgColor: { rgb: "1E3A5F" } }, alignment: { horizontal: "center", vertical: "center" } };
+  styleCell("A1", { ...titleStyle, font: { bold: true, sz: 12, color: { rgb: "FFFFFF" } } });
+  styleCell("A2", titleStyle);
+
+  // Header row style
+  const headerRowIdx = (subtitle ? 5 : 4) + (summaryCards?.length > 0 ? 2 : 0);
+  columns.forEach((_, ci) => {
+    const addr = XLSX.utils.encode_cell({ r: headerRowIdx, c: ci });
+    styleCell(addr, {
+      font: { bold: true, color: { rgb: "FFFFFF" }, sz: 11 },
+      fill: { fgColor: { rgb: "1E3A5F" } },
+      alignment: { horizontal: "center" },
+      border: { bottom: { style: "medium", color: { rgb: "2563A8" } } },
+    });
+  });
+
+  // Data row styles
+  rows.forEach((r, ri) => {
+    const rowIdx = headerRowIdx + 1 + ri;
+    const isAlt = ri % 2 === 1;
+    columns.forEach((col, ci) => {
+      const addr = XLSX.utils.encode_cell({ r: rowIdx, c: ci });
+      let fill = isAlt ? { fgColor: { rgb: "EFF6FF" } } : { fgColor: { rgb: "FFFFFF" } };
+      let font = { sz: 10 };
+      if (col.key === "status") {
+        const sv = r[col.key];
+        const colorMap = { "حاضر": "16A34A", "متأخر": "D97706", "غائب": "DC2626", "إجازة": "0891B2", "مأمورية": "7C3AED" };
+        const bgMap   = { "حاضر": "F0FDF4", "متأخر": "FFFBEB", "غائب": "FEF2F2", "إجازة": "E0F2FE", "مأمورية": "F5F3FF" };
+        fill = { fgColor: { rgb: bgMap[sv] || "F1F5F9" } };
+        font = { sz: 10, bold: true, color: { rgb: colorMap[sv] || "374151" } };
+      }
+      if (col.key === "lateMinutes" && r[col.key] && parseInt(r[col.key]) > 0) {
+        font = { sz: 10, bold: true, color: { rgb: "D97706" } };
+      }
+      styleCell(addr, { font, fill, alignment: { horizontal: "center" }, border: { bottom: { style: "thin", color: { rgb: "E2E8F0" } }, right: { style: "thin", color: { rgb: "E2E8F0" } } } });
+    });
+  });
+
+  XLSX.utils.book_append_sheet(wb, ws, sheetName || "التقرير");
+  XLSX.writeFile(wb, filename || "تقرير.xlsx");
+}
+
+
+// ══════════════════════════════════════════════
+//  HELPERS
+// ══════════════════════════════════════════════
+const generateId = () => Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
+
+const getToday = () => new Date().toISOString().split("T")[0];
+
+const getTimeNow = () => {
+  const n = new Date();
+  return `${String(n.getHours()).padStart(2, "0")}:${String(n.getMinutes()).padStart(2, "0")}`;
+};
+
+const calcWorkHours = (checkIn, checkOut) => {
+  if (!checkIn || !checkOut) return "-";
+  const [ih, im] = checkIn.split(":").map(Number);
+  const [oh, om] = checkOut.split(":").map(Number);
+  const diff = (oh * 60 + om) - (ih * 60 + im);
+  if (diff <= 0) return "-";
+  const h = Math.floor(diff / 60);
+  const m = diff % 60;
+  return `${h}س ${m}د`;
+};
+
+const calcLateMinutes = (checkIn, workStart, tolerance) => {
+  if (!checkIn) return 0;
+  const [ih, im] = checkIn.split(":").map(Number);
+  const [wh, wm] = workStart.split(":").map(Number);
+  const diff = (ih * 60 + im) - (wh * 60 + wm);
+  return diff > tolerance ? diff : 0;
+};
+
+const getStatus = (checkIn, workStart, tolerance) => {
+  if (!checkIn) return "غائب";
+  const late = calcLateMinutes(checkIn, workStart, tolerance);
+  return late > 0 ? "متأخر" : "حاضر";
+};
+
+const formatDateAr = (dateStr) => {
+  if (!dateStr) return "-";
+  const d = new Date(dateStr + "T00:00:00");
+  return d.toLocaleDateString("ar-EG", { weekday: "short", year: "numeric", month: "short", day: "numeric" });
+};
+
+const dayNameAr = (dateStr) => {
+  const days = ["الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
+  return days[new Date(dateStr + "T00:00:00").getDay()];
+};
+
+// ══════════════════════════════════════════════
+//  FIREBASE HOOK (Real-time sync + Offline)
+// ══════════════════════════════════════════════
+const KEYS = {
+  employees: "att_employees",
+  records: "att_records",
+  settings: "att_settings",
+  shifts: "att_shifts",
+};
+
+// مؤشر حالة الاتصال
+function SyncIndicator({ synced, online }) {
+  return (
+    <div style={{
+      position: "fixed", bottom: 16, left: 16, zIndex: 9999,
+      background: online ? (synced ? "#16a34a" : "#d97706") : "#dc2626",
+      color: "white", borderRadius: 20, padding: "6px 14px",
+      fontSize: 12, fontWeight: "700", fontFamily: "Cairo, Arial",
+      boxShadow: "0 2px 10px rgba(0,0,0,0.2)",
+      display: "flex", alignItems: "center", gap: 6,
+      transition: "all 0.3s",
+    }}>
+      <span style={{ width: 8, height: 8, borderRadius: "50%", background: "rgba(255,255,255,0.7)", display: "inline-block",
+        animation: !online || !synced ? "pulse3 1.5s infinite" : "none" }} />
+      {online ? (synced ? "متزامن ✓" : "جاري المزامنة...") : "غير متصل — بيانات محفوظة محلياً"}
+      <style>{`@keyframes pulse3{0%,100%{opacity:0.4}50%{opacity:1}}`}</style>
+    </div>
+  );
+}
+
+const DEFAULT_SETTINGS = {
+  adminUsername: "admin",
+  adminPassword: "admin123",
+  workStart: "09:00",
+  workEnd: "17:00",
+  lateTolerance: 15,
+  lastBackup: null,
+  companyName: "شركتي",
+  companyLogo: null,
+};
+
+const DEFAULT_SHIFTS = [
+  { id: "shift1", name: "الشيفت الصباحي", start: "08:00", end: "14:00", tolerance: 15, color: "#2563a8" },
+  { id: "shift2", name: "الشيفت المسائي", start: "14:00", end: "22:00", tolerance: 10, color: "#7c3aed" },
+];
+
+const DEFAULT_EMPLOYEES = [
+  { id: "emp1", name: "أحمد محمد السيد", username: "ahmed", password: "1234", department: "المبيعات", phone: "01001234567", createdAt: "2026-01-01", shiftId: "shift1" },
+  { id: "emp2", name: "سارة علي حسن", username: "sara", password: "1234", department: "المحاسبة", phone: "01112345678", createdAt: "2026-01-01", shiftId: "shift2" },
+  { id: "emp3", name: "محمود خالد إبراهيم", username: "mahmoud", password: "1234", department: "تقنية المعلومات", phone: "01223456789", createdAt: "2026-01-01", shiftId: "shift1" },
+];
+
+const DEFAULT_RECORDS = [
+  { id: "r1", employeeId: "emp1", date: "2026-05-12", checkIn: "08:55", checkOut: "17:10", status: "حاضر", lateMinutes: 0 },
+  { id: "r2", employeeId: "emp2", date: "2026-05-12", checkIn: "09:02", checkOut: "17:05", status: "حاضر", lateMinutes: 0 },
+  { id: "r3", employeeId: "emp3", date: "2026-05-12", checkIn: "09:45", checkOut: "17:00", status: "متأخر", lateMinutes: 30 },
+  { id: "r4", employeeId: "emp1", date: "2026-05-13", checkIn: "08:50", checkOut: "17:15", status: "حاضر", lateMinutes: 0 },
+  { id: "r5", employeeId: "emp2", date: "2026-05-13", checkIn: "09:00", checkOut: "17:00", status: "حاضر", lateMinutes: 0 },
+  { id: "r6", employeeId: "emp3", date: "2026-05-13", checkIn: "09:20", checkOut: "17:30", status: "متأخر", lateMinutes: 5 },
+  { id: "r7", employeeId: "emp1", date: "2026-05-14", checkIn: "08:58", checkOut: null, status: "حاضر", lateMinutes: 0 },
+  { id: "r8", employeeId: "emp2", date: "2026-05-14", checkIn: "09:10", checkOut: null, status: "حاضر", lateMinutes: 0 },
+];
+
+function useDB() {
+  const [employees, setEmployeesState] = useState(() => {
+    try { const s = localStorage.getItem(KEYS.employees); return s ? JSON.parse(s) : DEFAULT_EMPLOYEES; } catch { return DEFAULT_EMPLOYEES; }
+  });
+  const [records, setRecordsState] = useState(() => {
+    try { const s = localStorage.getItem(KEYS.records); return s ? JSON.parse(s) : DEFAULT_RECORDS; } catch { return DEFAULT_RECORDS; }
+  });
+  const [settings, setSettingsState] = useState(() => {
+    try { const s = localStorage.getItem(KEYS.settings); return s ? { ...DEFAULT_SETTINGS, ...JSON.parse(s) } : DEFAULT_SETTINGS; } catch { return DEFAULT_SETTINGS; }
+  });
+  const [shifts, setShiftsState] = useState(() => {
+    try { const s = localStorage.getItem(KEYS.shifts); return s ? JSON.parse(s) : DEFAULT_SHIFTS; } catch { return DEFAULT_SHIFTS; }
+  });
+  const [synced, setSynced] = useState(false);
+  const [online, setOnline] = useState(navigator.onLine);
+
+  // مراقبة الاتصال
+  useEffect(() => {
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
+  }, []);
+
+  // Firebase real-time listeners (compat API) - مع retry
+  useEffect(() => {
+    let unsubs = [];
+    let cancelled = false;
+
+    function attach() {
+      const db = window.__fsdb;
+      if (!db) { if (!cancelled) setTimeout(attach, 200); return; }
+
+      unsubs.push(db.collection("employees").onSnapshot(snap => {
+        if (!snap.empty) {
+          const data = snap.docs.map(d => d.data());
+          setEmployeesState(data);
+          localStorage.setItem(KEYS.employees, JSON.stringify(data));
+        }
+        setSynced(true);
+      }, () => setSynced(false)));
+
+      unsubs.push(db.collection("records").onSnapshot(snap => {
+        if (!snap.empty) {
+          const data = snap.docs.map(d => d.data());
+          setRecordsState(data);
+          localStorage.setItem(KEYS.records, JSON.stringify(data));
+        }
+      }, () => {}));
+
+      unsubs.push(db.collection("settings").onSnapshot(snap => {
+        if (!snap.empty) {
+          const merged = {};
+          snap.docs.forEach(d => Object.assign(merged, d.data()));
+          const s = { ...DEFAULT_SETTINGS, ...merged };
+          setSettingsState(s);
+          localStorage.setItem(KEYS.settings, JSON.stringify(s));
+        }
+      }, () => {}));
+
+      unsubs.push(db.collection("shifts").onSnapshot(snap => {
+        if (!snap.empty) {
+          const data = snap.docs.map(d => d.data());
+          setShiftsState(data);
+          localStorage.setItem(KEYS.shifts, JSON.stringify(data));
+        }
+      }, () => {}));
+    }
+
+    attach();
+    return () => { cancelled = true; unsubs.forEach(u => u()); };
+  }, []);
+
+  // Helper: اكتب في Firebase + localStorage
+  function fsSet(collName, id, data) {
+    localStorage.setItem(KEYS[collName] || collName, JSON.stringify(data)); // fallback local
+    const fsdb = window.__fsdb;
+    const mods = window.__fsMods;
+    if (fsdb && mods) {
+      const { doc, setDoc, collection } = mods;
+      setDoc(doc(fsdb, collName, id), data).catch(() => {});
+    }
+  }
+
+  function fsDel(collName, id) {
+    const fsdb = window.__fsdb;
+    const mods = window.__fsMods;
+    if (fsdb && mods) {
+      const { doc, deleteDoc } = mods;
+      deleteDoc(doc(fsdb, collName, id)).catch(() => {});
+    }
+  }
+
+  // setEmployees: يكتب كل موظف كـ document منفصل (compat API)
+  const setEmployees = useCallback((val) => {
+    const next = typeof val === "function" ? val(employees) : val;
+    setEmployeesState(next);
+    localStorage.setItem(KEYS.employees, JSON.stringify(next));
+    const db = window.__fsdb;
+    if (db) {
+      const batch = db.batch();
+      next.forEach(emp => batch.set(db.collection("employees").doc(emp.id), emp));
+      batch.commit().catch(() => {});
+    }
+  }, [employees]);
+
+  const setRecords = useCallback((val) => {
+    const next = typeof val === "function" ? val(records) : val;
+    setRecordsState(next);
+    localStorage.setItem(KEYS.records, JSON.stringify(next));
+    const db = window.__fsdb;
+    if (db) {
+      const batch = db.batch();
+      next.forEach(rec => batch.set(db.collection("records").doc(rec.id), rec));
+      batch.commit().catch(() => {});
+    }
+  }, [records]);
+
+  const setSettings = useCallback((val) => {
+    const next = typeof val === "function" ? val(settings) : val;
+    setSettingsState(next);
+    localStorage.setItem(KEYS.settings, JSON.stringify(next));
+    const db = window.__fsdb;
+    if (db) {
+      db.collection("settings").doc("main").set(next).catch(() => {});
+    }
+  }, [settings]);
+
+  const setShifts = useCallback((val) => {
+    const next = typeof val === "function" ? val(shifts) : val;
+    setShiftsState(next);
+    localStorage.setItem(KEYS.shifts, JSON.stringify(next));
+    const db = window.__fsdb;
+    if (db) {
+      const batch = db.batch();
+      next.forEach(sh => batch.set(db.collection("shifts").doc(sh.id), sh));
+      batch.commit().catch(() => {});
+    }
+  }, [shifts]);
+
+  return { employees, setEmployees, records, setRecords, settings, setSettings, shifts, setShifts, synced, online };
+}
+
+// ══════════════════════════════════════════════
+//  TOAST
+// ══════════════════════════════════════════════
+function Toast({ toasts }) {
+  return (
+    <div style={{ position: "fixed", top: 20, left: "50%", transform: "translateX(-50%)", zIndex: 9999, display: "flex", flexDirection: "column", gap: 8, alignItems: "center" }}>
+      {toasts.map(t => (
+        <div key={t.id} style={{
+          padding: "12px 24px", borderRadius: 10, fontWeight: "bold", fontSize: 14,
+          background: t.type === "success" ? "#22c55e" : t.type === "error" ? "#ef4444" : "#3b82f6",
+          color: "white", boxShadow: "0 4px 20px rgba(0,0,0,0.25)",
+          animation: "slideDown 0.3s ease", fontFamily: "Cairo, Arial",
+        }}>{t.msg}</div>
+      ))}
+    </div>
+  );
+}
+
+function useToast() {
+  const [toasts, setToasts] = useState([]);
+  const show = useCallback((msg, type = "success") => {
+    const id = Date.now();
+    setToasts(p => [...p, { id, msg, type }]);
+    setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 2800);
+  }, []);
+  return { toasts, show };
+}
+
+// ══════════════════════════════════════════════
+//  MODAL
+// ══════════════════════════════════════════════
+function Modal({ title, onClose, children }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: "white", borderRadius: 16, width: "100%", maxWidth: 480, maxHeight: "90vh", overflowY: "auto", boxShadow: "0 25px 60px rgba(0,0,0,0.4)", fontFamily: "Cairo, Arial", direction: "rtl" }}>
+        <div style={{ padding: "20px 24px", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <h3 style={{ margin: 0, color: "#1e3a5f", fontSize: 18, fontWeight: "bold" }}>{title}</h3>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 22, cursor: "pointer", color: "#9ca3af", lineHeight: 1 }}>✕</button>
+        </div>
+        <div style={{ padding: "20px 24px" }}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════
+//  LOGIN SCREEN
+// ══════════════════════════════════════════════
+function LoginScreen({ onLogin, settings }) {
+  const [role, setRole] = useState("employee");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [showPass, setShowPass] = useState(false);
+  const [time, setTime] = useState(new Date());
+
+  useEffect(() => {
+    const t = setInterval(() => setTime(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const db = { employees: JSON.parse(localStorage.getItem(KEYS.employees) || "[]") };
+
+  function handleLogin() {
+    setError("");
+    if (!username || !password) { setError("من فضلك أدخل اسم المستخدم وكلمة السر"); return; }
+    if (role === "admin") {
+      if (username === settings.adminUsername && password === settings.adminPassword) {
+        onLogin({ role: "admin", name: settings.companyName || "المدير" });
+      } else { setError("اسم المستخدم أو كلمة السر غير صحيحة"); }
+    } else {
+      const employees = JSON.parse(localStorage.getItem(KEYS.employees) || JSON.stringify(DEFAULT_EMPLOYEES));
+      const emp = employees.find(e => e.username === username && e.password === password);
+      if (emp) { onLogin({ role: "employee", ...emp }); }
+      else { setError("اسم المستخدم أو كلمة السر غير صحيحة"); }
+    }
+  }
+
+  const timeStr = time.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const dateStr = time.toLocaleDateString("ar-EG", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+
+  return (
+    <div style={{
+      minHeight: "100vh", direction: "rtl", fontFamily: "Cairo, Arial, sans-serif",
+      background: "linear-gradient(135deg, #0a1628 0%, #1e3a5f 45%, #0f4c8a 100%)",
+      display: "flex", alignItems: "center", justifyContent: "center", position: "relative", overflow: "hidden",
+    }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap');
+        * { box-sizing: border-box; }
+        input:focus { outline: none !important; }
+        @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-12px)} }
+        @keyframes fadeUp { from{opacity:0;transform:translateY(30px)} to{opacity:1;transform:translateY(0)} }
+        @keyframes slideDown { from{opacity:0;transform:translateY(-20px)} to{opacity:1;transform:translateY(0)} }
+        @keyframes pulse { 0%,100%{opacity:0.15} 50%{opacity:0.35} }
+      `}</style>
+
+      {/* Background circles */}
+      {[...Array(5)].map((_, i) => (
+        <div key={i} style={{
+          position: "absolute", borderRadius: "50%", border: "1px solid rgba(255,255,255,0.08)",
+          width: [300, 500, 700, 900, 1100][i], height: [300, 500, 700, 900, 1100][i],
+          top: "50%", left: "50%", transform: "translate(-50%,-50%)",
+          animation: `pulse ${3 + i}s ease-in-out infinite`, animationDelay: `${i * 0.4}s`
+        }} />
+      ))}
+
+      <div style={{ position: "relative", zIndex: 10, width: "100%", maxWidth: 440, padding: "0 20px", animation: "fadeUp 0.6s ease" }}>
+        {/* Clock */}
+        <div style={{ textAlign: "center", marginBottom: 28 }}>
+          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.55)", marginBottom: 4, letterSpacing: 1 }}>{dateStr}</div>
+          <div style={{ fontSize: 38, fontWeight: "800", color: "white", letterSpacing: 2, fontVariantNumeric: "tabular-nums" }}>{timeStr}</div>
+        </div>
+
+        {/* Card */}
+        <div style={{ background: "rgba(255,255,255,0.97)", borderRadius: 24, padding: "36px 32px", boxShadow: "0 30px 80px rgba(0,0,0,0.5)" }}>
+          <div style={{ textAlign: "center", marginBottom: 28 }}>
+            <div style={{ fontSize: 48, marginBottom: 8, animation: "float 3s ease-in-out infinite" }}>🏢</div>
+            <h1 style={{ margin: 0, fontSize: 22, fontWeight: "800", color: "#1e3a5f" }}>نظام الحضور والانصراف</h1>
+            <p style={{ margin: "4px 0 0", fontSize: 13, color: "#94a3b8" }}>{settings.companyName}</p>
+          </div>
+
+          {/* Role Toggle */}
+          <div style={{ display: "flex", background: "#f1f5f9", borderRadius: 14, padding: 4, marginBottom: 24, gap: 4 }}>
+            {[{ val: "employee", label: "👤 موظف" }, { val: "admin", label: "👑 مدير" }].map(r => (
+              <button key={r.val} onClick={() => { setRole(r.val); setError(""); setUsername(""); setPassword(""); }}
+                style={{
+                  flex: 1, padding: "10px", border: "none", borderRadius: 10, cursor: "pointer",
+                  fontWeight: "700", fontSize: 15, transition: "all 0.25s", fontFamily: "Cairo, Arial",
+                  background: role === r.val ? "#1e3a5f" : "transparent",
+                  color: role === r.val ? "white" : "#64748b",
+                  boxShadow: role === r.val ? "0 4px 12px rgba(30,58,95,0.35)" : "none",
+                }}>{r.label}</button>
+            ))}
+          </div>
+
+          {/* Fields */}
+          {[
+            { label: "اسم المستخدم", val: username, set: setUsername, type: "text", placeholder: role === "admin" ? "admin" : "أدخل اسم المستخدم", icon: "👤" },
+            { label: "كلمة السر", val: password, set: setPassword, type: showPass ? "text" : "password", placeholder: "••••••••", icon: "🔒" },
+          ].map((f, i) => (
+            <div key={i} style={{ marginBottom: 16 }}>
+              <label style={{ display: "block", marginBottom: 6, color: "#374151", fontWeight: "700", fontSize: 13 }}>{f.label}</label>
+              <div style={{ position: "relative" }}>
+                <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 16 }}>{f.icon}</span>
+                <input value={f.val} onChange={e => f.set(e.target.value)}
+                  type={f.type} placeholder={f.placeholder}
+                  onKeyDown={e => e.key === "Enter" && handleLogin()}
+                  style={{
+                    width: "100%", padding: "12px 40px 12px 40px", border: "2px solid #e2e8f0",
+                    borderRadius: 10, fontSize: 15, fontFamily: "Cairo, Arial",
+                    transition: "border 0.2s", background: "#fafafa",
+                  }}
+                  onFocus={e => e.target.style.borderColor = "#2563a8"}
+                  onBlur={e => e.target.style.borderColor = "#e2e8f0"}
+                />
+                {i === 1 && (
+                  <button onClick={() => setShowPass(p => !p)} style={{
+                    position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)",
+                    background: "none", border: "none", cursor: "pointer", fontSize: 16,
+                  }}>{showPass ? "🙈" : "👁️"}</button>
+                )}
+              </div>
+            </div>
+          ))}
+
+          {error && (
+            <div style={{ background: "#fef2f2", border: "1px solid #fca5a5", borderRadius: 8, padding: "10px 14px", marginBottom: 16, color: "#dc2626", fontSize: 13, fontWeight: "600" }}>
+              ⚠️ {error}
+            </div>
+          )}
+
+          <button onClick={handleLogin} style={{
+            width: "100%", padding: "14px", background: "linear-gradient(135deg, #1e3a5f, #2563a8)",
+            color: "white", border: "none", borderRadius: 12, fontSize: 17, fontWeight: "800",
+            cursor: "pointer", fontFamily: "Cairo, Arial", letterSpacing: 1,
+            boxShadow: "0 6px 20px rgba(30,58,95,0.4)", transition: "transform 0.15s",
+          }}
+            onMouseEnter={e => e.target.style.transform = "translateY(-1px)"}
+            onMouseLeave={e => e.target.style.transform = "translateY(0)"}
+          >
+            دخول ←
+          </button>
+
+          {/* Import backup on login screen */}
+          <div style={{ marginTop: 20, borderTop: "1px solid #e2e8f0", paddingTop: 16 }}>
+            <p style={{ textAlign: "center", fontSize: 12, color: "#94a3b8", marginBottom: 10 }}>
+              📱 بتفتح الملف لأول مرة على هذا المتصفح؟
+            </p>
+            <label style={{
+              display: "block", width: "100%", padding: "11px", textAlign: "center",
+              background: "#eff6ff", color: "#2563a8", border: "2px dashed #93c5fd",
+              borderRadius: 10, fontWeight: "700", cursor: "pointer", fontSize: 13,
+              fontFamily: "Cairo, Arial",
+            }}>
+              📥 تحميل بياناتك المحفوظة (JSON)
+              <input type="file" accept=".json" style={{ display: "none" }} onChange={(e) => {
+                const file = e.target.files[0]; if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                  try {
+                    const data = JSON.parse(ev.target.result);
+                    if (!data.employees || !data.records) { alert("❌ الملف غير صحيح!"); return; }
+                    if (!window.confirm("هل تريد تحميل هذه البيانات؟ سيتم استبدال أي بيانات موجودة.")) return;
+                    localStorage.setItem(KEYS.employees, JSON.stringify(data.employees));
+                    localStorage.setItem(KEYS.records, JSON.stringify(data.records));
+                    if (data.settings) localStorage.setItem(KEYS.settings, JSON.stringify(data.settings));
+                    if (data.shifts) localStorage.setItem(KEYS.shifts, JSON.stringify(data.shifts));
+                    alert("✅ تم تحميل البيانات! اضغط دخول الآن.");
+                    window.location.reload();
+                  } catch { alert("❌ خطأ في قراءة الملف!"); }
+                };
+                reader.readAsText(file); e.target.value = "";
+              }} />
+            </label>
+            <p style={{ textAlign: "center", fontSize: 11, color: "#cbd5e1", marginTop: 8, marginBottom: 0 }}>
+              💡 بعد أي تعديل، اضغط "حفظ نسخة احتياطية" من الإعدادات
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════
+//  EMPLOYEE FORM MODAL
+// ══════════════════════════════════════════════
+function EmployeeFormModal({ emp, onSave, onClose, shifts }) {
+  const [form, setForm] = useState(emp || { name: "", username: "", password: "", department: "", phone: "", shiftId: shifts[0]?.id || "" });
+  const [err, setErr] = useState("");
+
+  const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+
+  function save() {
+    if (!form.name || !form.username || !form.password) { setErr("الاسم واليوزر والباسورد مطلوبين"); return; }
+    onSave(form);
+  }
+
+  const fields = [
+    { key: "name", label: "الاسم الكامل", placeholder: "أحمد محمد" },
+    { key: "username", label: "اسم المستخدم", placeholder: "ahmed" },
+    { key: "password", label: "كلمة السر", placeholder: "••••••" },
+    { key: "department", label: "القسم", placeholder: "المبيعات" },
+    { key: "phone", label: "رقم الموبايل", placeholder: "01001234567" },
+  ];
+
+  return (
+    <Modal title={emp ? "✏️ تعديل موظف" : "➕ إضافة موظف جديد"} onClose={onClose}>
+      {fields.map(f => (
+        <div key={f.key} style={{ marginBottom: 14 }}>
+          <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>{f.label}</label>
+          <input value={form[f.key] || ""} onChange={e => set(f.key, e.target.value)}
+            placeholder={f.placeholder}
+            style={{ width: "100%", padding: "10px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial" }}
+            onFocus={e => e.target.style.borderColor = "#2563a8"}
+            onBlur={e => e.target.style.borderColor = "#e2e8f0"}
+          />
+        </div>
+      ))}
+      {/* Shift selector */}
+      <div style={{ marginBottom: 14 }}>
+        <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>الشيفت المخصص</label>
+        {shifts.length === 0 ? (
+          <div style={{ fontSize: 13, color: "#94a3b8", padding: "10px 12px", border: "2px solid #e2e8f0", borderRadius: 8 }}>
+            لا توجد شيفتات — أضف شيفت من الإعدادات أولاً
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {shifts.map(sh => (
+              <label key={sh.id} style={{
+                display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
+                border: `2px solid ${form.shiftId === sh.id ? sh.color : "#e2e8f0"}`,
+                borderRadius: 10, cursor: "pointer", transition: "all 0.2s",
+                background: form.shiftId === sh.id ? `${sh.color}10` : "white",
+              }}>
+                <input type="radio" name="shift" value={sh.id} checked={form.shiftId === sh.id}
+                  onChange={() => set("shiftId", sh.id)} style={{ accentColor: sh.color }} />
+                <div>
+                  <div style={{ fontWeight: "700", fontSize: 14, color: form.shiftId === sh.id ? sh.color : "#374151" }}>{sh.name}</div>
+                  <div style={{ fontSize: 12, color: "#64748b" }}>{sh.start} ← {sh.end} &nbsp;|&nbsp; سماح: {sh.tolerance} دقيقة</div>
+                </div>
+                <span style={{ marginRight: "auto", width: 10, height: 10, borderRadius: "50%", background: sh.color, flexShrink: 0 }} />
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+      {err && <div style={{ color: "#dc2626", fontSize: 13, marginBottom: 12, fontWeight: "600" }}>⚠️ {err}</div>}
+      <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+        <button onClick={save} style={{ flex: 1, padding: "11px", background: "#1e3a5f", color: "white", border: "none", borderRadius: 8, fontWeight: "700", fontSize: 15, cursor: "pointer", fontFamily: "Cairo, Arial" }}>
+          {emp ? "حفظ التعديلات" : "إضافة الموظف"}
+        </button>
+        <button onClick={onClose} style={{ flex: 1, padding: "11px", background: "#f1f5f9", color: "#64748b", border: "none", borderRadius: 8, fontWeight: "700", fontSize: 15, cursor: "pointer", fontFamily: "Cairo, Arial" }}>
+          إلغاء
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// ══════════════════════════════════════════════
+//  TAB: EMPLOYEES MANAGEMENT
+// ══════════════════════════════════════════════
+function TabEmployees({ employees, setEmployees, records, toast, shifts }) {
+  const [modal, setModal] = useState(null);
+  const [search, setSearch] = useState("");
+  const [delConfirm, setDelConfirm] = useState(null);
+
+  const filtered = employees.filter(e =>
+    e.name.includes(search) || e.username.includes(search) || (e.department || "").includes(search)
+  );
+
+  function saveEmployee(form) {
+    if (modal === "add") {
+      const exists = employees.find(e => e.username === form.username);
+      if (exists) { toast("اسم المستخدم موجود بالفعل!", "error"); return; }
+      setEmployees(p => [...p, { ...form, id: generateId(), createdAt: getToday() }]);
+      toast("✅ تم إضافة الموظف بنجاح");
+    } else {
+      setEmployees(p => p.map(e => e.id === modal.id ? { ...e, ...form } : e));
+      toast("✅ تم تعديل بيانات الموظف");
+    }
+    setModal(null);
+  }
+
+  function deleteEmployee(id) {
+    setEmployees(p => p.filter(e => e.id !== id));
+    toast("🗑️ تم حذف الموظف", "error");
+    setDelConfirm(null);
+  }
+
+  const getAttCount = (id) => records.filter(r => r.employeeId === id).length;
+  const getShift = (shiftId) => shifts.find(s => s.id === shiftId);
+
+  return (
+    <div>
+      {modal && <EmployeeFormModal emp={modal === "add" ? null : modal} onSave={saveEmployee} onClose={() => setModal(null)} shifts={shifts} />}
+      {delConfirm && (
+        <Modal title="⚠️ تأكيد الحذف" onClose={() => setDelConfirm(null)}>
+          <p style={{ color: "#374151", marginTop: 0 }}>هل أنت متأكد من حذف الموظف <strong>{delConfirm.name}</strong>؟</p>
+          <p style={{ color: "#ef4444", fontSize: 13 }}>سيتم حذف الموظف فقط، سجلات الحضور ستبقى محفوظة.</p>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={() => deleteEmployee(delConfirm.id)} style={{ flex: 1, padding: "11px", background: "#ef4444", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontFamily: "Cairo, Arial" }}>نعم، احذف</button>
+            <button onClick={() => setDelConfirm(null)} style={{ flex: 1, padding: "11px", background: "#f1f5f9", color: "#374151", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontFamily: "Cairo, Arial" }}>إلغاء</button>
+          </div>
+        </Modal>
+      )}
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+        <h2 style={{ margin: 0, color: "#1e3a5f", fontSize: 20, fontWeight: "800" }}>👥 إدارة الموظفين</h2>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="🔍 بحث..."
+            style={{ padding: "8px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial", width: 180 }}
+            onFocus={e => e.target.style.borderColor = "#2563a8"}
+            onBlur={e => e.target.style.borderColor = "#e2e8f0"}
+          />
+          <button onClick={() => setModal("add")} style={{ padding: "9px 18px", background: "#1e3a5f", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 14, fontFamily: "Cairo, Arial" }}>
+            ➕ موظف جديد
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 20 }}>
+        {[
+          { label: "إجمالي الموظفين", val: employees.length, icon: "👥", color: "#1e3a5f" },
+          { label: "حاضر اليوم", val: records.filter(r => r.date === getToday()).length, icon: "✅", color: "#16a34a" },
+          { label: "غائب اليوم", val: employees.length - records.filter(r => r.date === getToday()).length, icon: "❌", color: "#dc2626" },
+        ].map((s, i) => (
+          <div key={i} style={{ background: "white", borderRadius: 12, padding: "16px", boxShadow: "0 2px 8px rgba(0,0,0,0.06)", borderRight: `4px solid ${s.color}` }}>
+            <div style={{ fontSize: 24, marginBottom: 4 }}>{s.icon}</div>
+            <div style={{ fontSize: 26, fontWeight: "800", color: s.color }}>{s.val}</div>
+            <div style={{ fontSize: 12, color: "#64748b", fontWeight: "600" }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ background: "white", borderRadius: 14, overflow: "hidden", boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Cairo, Arial" }}>
+            <thead>
+              <tr style={{ background: "#1e3a5f", color: "white" }}>
+                {["#", "الاسم الكامل", "اليوزر", "القسم", "الشيفت", "الموبايل", "أيام الحضور", "الإجراءات"].map(h => (
+                  <th key={h} style={{ padding: "13px 14px", textAlign: "right", fontSize: 13, fontWeight: "700", whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.length === 0 ? (
+                <tr><td colSpan={8} style={{ textAlign: "center", padding: 32, color: "#94a3b8", fontSize: 15 }}>لا يوجد موظفين</td></tr>
+              ) : filtered.map((emp, i) => {
+                const shift = getShift(emp.shiftId);
+                return (
+                  <tr key={emp.id} style={{ background: i % 2 === 0 ? "#f8fafc" : "white", transition: "background 0.15s" }}
+                    onMouseEnter={e => e.currentTarget.style.background = "#eff6ff"}
+                    onMouseLeave={e => e.currentTarget.style.background = i % 2 === 0 ? "#f8fafc" : "white"}
+                  >
+                    <td style={{ padding: "12px 14px", color: "#94a3b8", fontSize: 13 }}>{i + 1}</td>
+                    <td style={{ padding: "12px 14px", fontWeight: "700", color: "#1e293b" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <div style={{ width: 34, height: 34, borderRadius: "50%", background: shift ? shift.color : `hsl(${emp.name.charCodeAt(0) * 5},60%,50%)`, display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontSize: 15, fontWeight: "800", flexShrink: 0 }}>
+                          {emp.name[0]}
+                        </div>
+                        {emp.name}
+                      </div>
+                    </td>
+                    <td style={{ padding: "12px 14px", color: "#475569", fontSize: 13 }}>
+                      <code style={{ background: "#f1f5f9", padding: "2px 8px", borderRadius: 4, fontSize: 13 }}>{emp.username}</code>
+                    </td>
+                    <td style={{ padding: "12px 14px", color: "#475569" }}>
+                      <span style={{ background: "#eff6ff", color: "#2563a8", padding: "3px 10px", borderRadius: 20, fontSize: 12, fontWeight: "700" }}>{emp.department || "-"}</span>
+                    </td>
+                    <td style={{ padding: "12px 14px" }}>
+                      {shift ? (
+                        <span style={{ background: `${shift.color}18`, color: shift.color, padding: "3px 10px", borderRadius: 20, fontSize: 12, fontWeight: "700", whiteSpace: "nowrap" }}>
+                          {shift.name}
+                        </span>
+                      ) : <span style={{ color: "#94a3b8", fontSize: 12 }}>غير محدد</span>}
+                    </td>
+                    <td style={{ padding: "12px 14px", color: "#475569", fontSize: 13 }}>{emp.phone || "-"}</td>
+                    <td style={{ padding: "12px 14px" }}>
+                      <span style={{ background: "#f0fdf4", color: "#16a34a", padding: "3px 10px", borderRadius: 20, fontSize: 12, fontWeight: "700" }}>{getAttCount(emp.id)} يوم</span>
+                    </td>
+                    <td style={{ padding: "12px 14px" }}>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button onClick={() => setModal(emp)} style={{ padding: "6px 12px", background: "#eff6ff", color: "#2563a8", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 13, fontWeight: "700", fontFamily: "Cairo, Arial" }}>✏️ تعديل</button>
+                        <button onClick={() => setDelConfirm(emp)} style={{ padding: "6px 12px", background: "#fef2f2", color: "#dc2626", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 13, fontWeight: "700", fontFamily: "Cairo, Arial" }}>🗑️ حذف</button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ══════════════════════════════════════════════
+//  TAB: ATTENDANCE RECORDS
+// ══════════════════════════════════════════════
+function TabAttendance({ employees, records, toast, settings }) {
+  const [filterEmp, setFilterEmp] = useState("all");
+  const [filterFrom, setFilterFrom] = useState("");
+  const [filterTo, setFilterTo] = useState("");
+
+  const filtered = records.filter(r => {
+    if (filterEmp !== "all" && r.employeeId !== filterEmp) return false;
+    if (filterFrom && r.date < filterFrom) return false;
+    if (filterTo && r.date > filterTo) return false;
+    return true;
+  }).sort((a, b) => b.date.localeCompare(a.date));
+
+  const getEmpName = (id) => employees.find(e => e.id === id)?.name || "غير معروف";
+
+  // ─── إحصائيات سريعة ───
+  const totalPresent = filtered.filter(r => r.status === "حاضر").length;
+  const totalLate    = filtered.filter(r => r.status === "متأخر").length;
+  const totalAbsent  = filtered.filter(r => r.status === "غائب").length;
+  const totalLeave   = filtered.filter(r => r.status === "إجازة").length;
+
+  // ─── Excel ───
+  function exportCSV() {
+    if (filtered.length === 0) { toast("لا توجد بيانات للتصدير", "error"); return; }
+    const columns = [
+      { key: "name",       header: "الاسم",            width: 22 },
+      { key: "date",       header: "التاريخ",           width: 14 },
+      { key: "day",        header: "اليوم",             width: 12 },
+      { key: "checkIn",    header: "الحضور",            width: 10 },
+      { key: "checkOut",   header: "الانصراف",          width: 10 },
+      { key: "workHours",  header: "ساعات العمل",       width: 14 },
+      { key: "lateMinutes",header: "التأخير (دقيقة)",   width: 14 },
+      { key: "status",     header: "الحالة",            width: 12 },
+    ];
+    const rows = filtered.map(r => ({
+      name:        getEmpName(r.employeeId),
+      date:        r.date,
+      day:         dayNameAr(r.date),
+      checkIn:     r.checkIn || "-",
+      checkOut:    r.checkOut || "-",
+      workHours:   calcWorkHours(r.checkIn, r.checkOut),
+      lateMinutes: r.lateMinutes || 0,
+      status:      r.status,
+    }));
+    exportExcel({
+      title: "سجل الحضور والانصراف",
+      subtitle: `من ${filterFrom || "البداية"} إلى ${filterTo || "النهاية"}`,
+      columns, rows,
+      summaryCards: [
+        { label: "إجمالي السجلات", value: rows.length },
+        { label: "حاضر",  value: totalPresent },
+        { label: "متأخر", value: totalLate },
+        { label: "غائب",  value: totalAbsent },
+      ],
+      filename: `سجل_الحضور_${getToday()}.xlsx`,
+      sheetName: "سجل الحضور",
+      companyName: settings?.companyName,
+    });
+    toast("✅ تم تصدير ملف Excel");
+  }
+
+  // ─── PDF (نافذة طباعة) ───
+  function printPDF() {
+    if (filtered.length === 0) { toast("لا توجد بيانات للطباعة", "error"); return; }
+    const columns = [
+      { key: "name",       header: "الاسم" },
+      { key: "date",       header: "التاريخ" },
+      { key: "day",        header: "اليوم" },
+      { key: "checkIn",    header: "الحضور" },
+      { key: "checkOut",   header: "الانصراف" },
+      { key: "workHours",  header: "ساعات العمل" },
+      { key: "lateMinutes",header: "التأخير" },
+      { key: "status",     header: "الحالة" },
+    ];
+    const rows = filtered.map(r => ({
+      name:        getEmpName(r.employeeId),
+      date:        r.date,
+      day:         dayNameAr(r.date),
+      checkIn:     r.checkIn || "—",
+      checkOut:    r.checkOut || "—",
+      workHours:   calcWorkHours(r.checkIn, r.checkOut),
+      lateMinutes: r.lateMinutes > 0 ? `${r.lateMinutes} د` : "—",
+      status:      r.status,
+    }));
+    exportPDF({
+      title: "سجل الحضور والانصراف",
+      subtitle: `من ${filterFrom || "البداية"} إلى ${filterTo || "النهاية"} — ${rows.length} سجل`,
+      columns, rows,
+      summaryCards: [
+        { label: "إجمالي السجلات", value: filtered.length, bg: COLORS.light,  color: COLORS.navy,   border: COLORS.navy },
+        { label: "حاضر",           value: totalPresent,    bg: COLORS.mint,   color: COLORS.green,  border: COLORS.green },
+        { label: "متأخر",          value: totalLate,       bg: COLORS.yellow, color: COLORS.orange, border: COLORS.orange },
+        { label: "غائب",           value: totalAbsent,     bg: COLORS.rose,   color: COLORS.red,    border: COLORS.red },
+      ],
+      filename: `سجل_الحضور_${getToday()}.pdf`,
+      companyName: settings?.companyName,
+      companyLogo: settings?.companyLogo,
+    });
+    toast("✅ تم فتح نافذة الطباعة");
+  }
+
+  // ─── حفظ HTML بنفس شكل البرنامج ───
+  function exportHTML() {
+    if (filtered.length === 0) { toast("لا توجد بيانات للتصدير", "error"); return; }
+
+    const companyName = settings?.companyName || "نظام الحضور والانصراف";
+    const companyLogo = settings?.companyLogo || null;
+    const subtitle    = filterFrom || filterTo
+      ? `الفترة: ${filterFrom || "البداية"} — ${filterTo || "النهاية"}`
+      : `تاريخ التصدير: ${new Date().toLocaleDateString("ar-EG")}`;
+
+    const statusBadge = (s) => {
+      const map = {
+        "حاضر":    "background:#dcfce7;color:#16a34a;",
+        "متأخر":   "background:#fef9c3;color:#d97706;",
+        "غائب":    "background:#fee2e2;color:#dc2626;",
+        "إجازة":   "background:#e0f2fe;color:#0891b2;",
+        "مأمورية": "background:#f5f3ff;color:#7c3aed;",
+      };
+      return `<span style="display:inline-block;padding:3px 12px;border-radius:20px;font-size:12px;font-weight:700;${map[s]||"background:#f1f5f9;color:#64748b;"}">${s}</span>`;
+    };
+
+    const tableRows = filtered.map((r, i) => {
+      const empName = getEmpName(r.employeeId);
+      const bg = i % 2 === 0 ? "#f8fafc" : "#ffffff";
+      const lateStyle = r.lateMinutes > 0 ? "color:#d97706;font-weight:700;" : "color:#94a3b8;";
+      return `
+      <tr style="background:${bg};">
+        <td style="padding:11px 14px;font-weight:700;color:#1e293b;">${empName}</td>
+        <td style="padding:11px 14px;color:#475569;font-size:13px;">${r.date}</td>
+        <td style="padding:11px 14px;color:#475569;font-size:13px;">${dayNameAr(r.date)}</td>
+        <td style="padding:11px 14px;color:#059669;font-weight:700;">${r.checkIn || "—"}</td>
+        <td style="padding:11px 14px;color:#dc2626;font-weight:700;">${r.checkOut || "—"}</td>
+        <td style="padding:11px 14px;color:#2563a8;font-weight:700;">${calcWorkHours(r.checkIn, r.checkOut)}</td>
+        <td style="padding:11px 14px;${lateStyle}font-size:13px;">${r.lateMinutes > 0 ? r.lateMinutes + " د" : "—"}</td>
+        <td style="padding:11px 14px;">${statusBadge(r.status)}</td>
+      </tr>`;
+    }).join("");
+
+    const logoHTML = companyLogo
+      ? `<img src="${companyLogo}" style="height:52px;max-width:140px;object-fit:contain;border-radius:8px;" alt="logo"/>`
+      : `<div style="width:52px;height:52px;border-radius:12px;background:rgba(255,255,255,0.2);display:flex;align-items:center;justify-content:center;font-size:28px;">🏢</div>`;
+
+    const statsCards = [
+      { label:"إجمالي السجلات", value: filtered.length, color:"#1e3a5f", bg:"#eff6ff", border:"#bfdbfe" },
+      { label:"حاضر",           value: totalPresent,    color:"#16a34a", bg:"#f0fdf4", border:"#bbf7d0" },
+      { label:"متأخر",          value: totalLate,       color:"#d97706", bg:"#fefce8", border:"#fde68a" },
+      { label:"غائب",           value: totalAbsent,     color:"#dc2626", bg:"#fef2f2", border:"#fecaca" },
+      { label:"إجازة",          value: totalLeave,      color:"#0891b2", bg:"#f0f9ff", border:"#bae6fd" },
+    ].map(c => `
+      <div style="flex:1;min-width:110px;background:${c.bg};border:2px solid ${c.border};border-radius:12px;padding:16px 12px;text-align:center;">
+        <div style="font-size:26px;font-weight:900;color:${c.color};margin-bottom:4px;">${c.value}</div>
+        <div style="font-size:12px;color:#64748b;font-weight:700;">${c.label}</div>
+      </div>`).join("");
+
+    const empFilter = filterEmp !== "all" ? getEmpName(filterEmp) : "كل الموظفين";
+
+    const html = `<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>سجل الحضور — ${companyName}</title>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap" rel="stylesheet"/>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{font-family:'Cairo',Arial,sans-serif;direction:rtl;background:#f1f5f9;color:#1e293b;min-height:100vh;}
+    @media print{
+      body{background:#fff;}
+      .no-print{display:none!important;}
+      .card{box-shadow:none!important;}
+    }
+    table{width:100%;border-collapse:collapse;}
+    th{padding:12px 14px;text-align:right;font-size:13px;font-weight:700;white-space:nowrap;}
+    td{border-bottom:1px solid #f1f5f9;}
+    tr:hover{background:#f0f9ff!important;}
+    .btn{display:inline-flex;align-items:center;gap:6px;padding:10px 20px;border:none;border-radius:10px;font-family:'Cairo',Arial;font-size:14px;font-weight:700;cursor:pointer;transition:opacity .15s;}
+    .btn:hover{opacity:.88;}
+  </style>
+</head>
+<body>
+  <!-- HEADER -->
+  <div style="background:linear-gradient(135deg,#0a1628 0%,#1e3a5f 50%,#0f4c8a 100%);padding:0 0 0 0;">
+    <div style="max-width:1100px;margin:0 auto;padding:22px 28px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px;">
+        <div style="display:flex;align-items:center;gap:16px;">
+          ${logoHTML}
+          <div>
+            <div style="color:rgba(255,255,255,.6);font-size:12px;margin-bottom:2px;">${companyName}</div>
+            <div style="color:#fff;font-size:22px;font-weight:900;line-height:1.2;">📊 سجل الحضور والانصراف</div>
+            <div style="color:rgba(255,255,255,.65);font-size:13px;margin-top:4px;">${subtitle}</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;" class="no-print">
+          <button class="btn" onclick="window.print()" style="background:#2563a8;color:#fff;">🖨️ طباعة / PDF</button>
+          <button class="btn" onclick="window.close()" style="background:rgba(255,255,255,.15);color:#fff;">✕ إغلاق</button>
+        </div>
+        <div style="text-align:center;color:rgba(255,255,255,.7);font-size:12px;">
+          <div style="font-size:11px;margin-bottom:2px;">تاريخ التصدير</div>
+          <div style="font-weight:700;font-size:15px;color:#fff;">${new Date().toLocaleDateString("ar-EG",{weekday:"long",year:"numeric",month:"long",day:"numeric"})}</div>
+        </div>
+      </div>
+
+      <!-- FILTER BAR -->
+      <div style="display:flex;align-items:center;gap:16px;margin-top:18px;padding:12px 16px;background:rgba(255,255,255,.1);border-radius:12px;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:8px;color:rgba(255,255,255,.85);font-size:13px;font-weight:700;">
+          <span>👤</span><span>${empFilter}</span>
+        </div>
+        ${filterFrom ? `<div style="display:flex;align-items:center;gap:6px;color:rgba(255,255,255,.75);font-size:12px;"><span>📅 من:</span><span style="font-weight:700;color:#fff;">${filterFrom}</span></div>` : ""}
+        ${filterTo   ? `<div style="display:flex;align-items:center;gap:6px;color:rgba(255,255,255,.75);font-size:12px;"><span>📅 إلى:</span><span style="font-weight:700;color:#fff;">${filterTo}</span></div>` : ""}
+        <div style="color:rgba(255,255,255,.6);font-size:12px;margin-right:auto;">إجمالي: <strong style="color:#fff;">${filtered.length} سجل</strong></div>
+      </div>
+    </div>
+  </div>
+
+  <div style="max-width:1100px;margin:0 auto;padding:24px 28px;">
+
+    <!-- STATS CARDS -->
+    <div style="display:flex;gap:12px;margin-bottom:24px;flex-wrap:wrap;">
+      ${statsCards}
+    </div>
+
+    <!-- TABLE CARD -->
+    <div class="card" style="background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.08);">
+      <div style="padding:16px 20px;background:#1e3a5f;display:flex;align-items:center;justify-content:space-between;">
+        <span style="color:#fff;font-weight:800;font-size:15px;">🗂️ تفاصيل السجلات</span>
+        <span style="color:rgba(255,255,255,.65);font-size:12px;">${filtered.length} سجل</span>
+      </div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead>
+            <tr style="background:#1e3a5f;">
+              <th style="color:#fff;">الاسم</th>
+              <th style="color:#fff;">التاريخ</th>
+              <th style="color:#fff;">اليوم</th>
+              <th style="color:#fff;">الحضور</th>
+              <th style="color:#fff;">الانصراف</th>
+              <th style="color:#fff;">ساعات العمل</th>
+              <th style="color:#fff;">التأخير</th>
+              <th style="color:#fff;">الحالة</th>
+            </tr>
+          </thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- FOOTER -->
+    <div style="margin-top:20px;text-align:center;font-size:12px;color:#94a3b8;padding:12px;">
+      ${companyName} — نظام الحضور والانصراف &nbsp;|&nbsp; ${new Date().toLocaleDateString("ar-EG")}
+    </div>
+  </div>
+</body>
+</html>`;
+
+    // حفظ الملف مباشرة
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `سجل_الحضور_${getToday()}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+    toast("✅ تم حفظ الملف — افتحه بالمتصفح");
+  }
+
+  const statusStyle = (s) => ({
+    padding: "3px 10px", borderRadius: 20, fontSize: 12, fontWeight: "700",
+    background: s === "حاضر" ? "#f0fdf4" : s === "متأخر" ? "#fffbeb" : s === "غائب" ? "#fef2f2" : s === "إجازة" ? "#e0f2fe" : "#f5f3ff",
+    color:      s === "حاضر" ? "#16a34a" : s === "متأخر" ? "#d97706" : s === "غائب" ? "#dc2626" : s === "إجازة" ? "#0891b2" : "#7c3aed",
+  });
+
+  return (
+    <div>
+      {/* HEADER ROW */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+        <h2 style={{ margin: 0, color: "#1e3a5f", fontSize: 20, fontWeight: "800" }}>📊 سجل الحضور والانصراف</h2>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={exportCSV} style={{ padding: "9px 16px", background: "#16a34a", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 13, fontFamily: "Cairo, Arial", display: "flex", alignItems: "center", gap: 5 }}>
+            📥 Excel
+          </button>
+          <button onClick={printPDF} style={{ padding: "9px 16px", background: "#dc2626", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 13, fontFamily: "Cairo, Arial", display: "flex", alignItems: "center", gap: 5 }}>
+            🖨️ PDF
+          </button>
+          <button onClick={exportHTML} style={{ padding: "9px 16px", background: "#1e3a5f", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 13, fontFamily: "Cairo, Arial", display: "flex", alignItems: "center", gap: 5 }}>
+            💾 حفظ HTML
+          </button>
+        </div>
+      </div>
+
+      {/* STATS MINI CARDS */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(110px,1fr))", gap: 10, marginBottom: 16 }}>
+        {[
+          { label: "إجمالي", value: filtered.length, color: "#1e3a5f", bg: "#eff6ff", border: "#bfdbfe" },
+          { label: "حاضر",   value: totalPresent,    color: "#16a34a", bg: "#f0fdf4", border: "#bbf7d0" },
+          { label: "متأخر",  value: totalLate,       color: "#d97706", bg: "#fefce8", border: "#fde68a" },
+          { label: "غائب",   value: totalAbsent,     color: "#dc2626", bg: "#fef2f2", border: "#fecaca" },
+          { label: "إجازة",  value: totalLeave,      color: "#0891b2", bg: "#f0f9ff", border: "#bae6fd" },
+        ].map((s, i) => (
+          <div key={i} style={{ background: s.bg, border: `2px solid ${s.border}`, borderRadius: 12, padding: "12px 10px", textAlign: "center" }}>
+            <div style={{ fontSize: 22, fontWeight: "900", color: s.color }}>{s.value}</div>
+            <div style={{ fontSize: 11, color: "#64748b", fontWeight: "700", marginTop: 3 }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* FILTERS */}
+      <div style={{ background: "white", borderRadius: 12, padding: 16, marginBottom: 16, display: "flex", gap: 12, flexWrap: "wrap", boxShadow: "0 2px 8px rgba(0,0,0,0.06)", alignItems: "center" }}>
+        <select value={filterEmp} onChange={e => setFilterEmp(e.target.value)}
+          style={{ padding: "8px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial", minWidth: 160 }}>
+          <option value="all">كل الموظفين</option>
+          {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+        </select>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 12, color: "#64748b", fontWeight: "700" }}>من</span>
+          <input type="date" value={filterFrom} onChange={e => setFilterFrom(e.target.value)}
+            style={{ padding: "8px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial" }} />
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 12, color: "#64748b", fontWeight: "700" }}>إلى</span>
+          <input type="date" value={filterTo} onChange={e => setFilterTo(e.target.value)}
+            style={{ padding: "8px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial" }} />
+        </div>
+        <button onClick={() => { setFilterEmp("all"); setFilterFrom(""); setFilterTo(""); }}
+          style={{ padding: "8px 14px", background: "#f1f5f9", color: "#64748b", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 13, fontFamily: "Cairo, Arial" }}>
+          🔄 مسح
+        </button>
+        <span style={{ marginRight: "auto", fontSize: 13, color: "#64748b", fontWeight: "600" }}>{filtered.length} سجل</span>
+      </div>
+
+      {/* TABLE */}
+      <div style={{ background: "white", borderRadius: 14, overflow: "hidden", boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Cairo, Arial" }}>
+            <thead>
+              <tr style={{ background: "#1e3a5f", color: "white" }}>
+                {["الاسم", "التاريخ", "اليوم", "الحضور", "الانصراف", "ساعات العمل", "التأخير", "الحالة"].map(h => (
+                  <th key={h} style={{ padding: "12px 14px", textAlign: "right", fontSize: 13, fontWeight: "700", whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.length === 0 ? (
+                <tr><td colSpan={8} style={{ textAlign: "center", padding: 32, color: "#94a3b8" }}>لا توجد سجلات</td></tr>
+              ) : filtered.map((r, i) => (
+                <tr key={r.id} style={{ background: i % 2 === 0 ? "#f8fafc" : "white" }}>
+                  <td style={{ padding: "11px 14px", fontWeight: "700", color: "#1e293b" }}>{getEmpName(r.employeeId)}</td>
+                  <td style={{ padding: "11px 14px", color: "#475569", fontSize: 13 }}>{r.date}</td>
+                  <td style={{ padding: "11px 14px", color: "#475569", fontSize: 13 }}>{dayNameAr(r.date)}</td>
+                  <td style={{ padding: "11px 14px", color: "#059669", fontWeight: "700" }}>{r.checkIn || "—"}</td>
+                  <td style={{ padding: "11px 14px", color: "#dc2626", fontWeight: "700" }}>{r.checkOut || "—"}</td>
+                  <td style={{ padding: "11px 14px", color: "#2563a8", fontWeight: "700" }}>{calcWorkHours(r.checkIn, r.checkOut)}</td>
+                  <td style={{ padding: "11px 14px", color: r.lateMinutes > 0 ? "#d97706" : "#94a3b8", fontWeight: "700", fontSize: 13 }}>
+                    {r.lateMinutes > 0 ? `${r.lateMinutes} د` : "—"}
+                  </td>
+                  <td style={{ padding: "11px 14px" }}><span style={statusStyle(r.status)}>{r.status}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {filtered.length > 0 && (
+          <div style={{ padding: "10px 16px", background: "#f8fafc", borderTop: "1px solid #f1f5f9", fontSize: 12, color: "#94a3b8", display: "flex", justifyContent: "space-between" }}>
+            <span>يعرض {filtered.length} سجل</span>
+            <span>{new Date().toLocaleDateString("ar-EG")}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════
+//  TAB: MONTHLY REPORT
+// ══════════════════════════════════════════════
+function TabMonthlyReport({ employees, records, settings, toast, shifts }) {
+  const [selEmp, setSelEmp] = useState("");
+  const [selMonth, setSelMonth] = useState(String(new Date().getMonth() + 1).padStart(2, "0"));
+  const [selYear, setSelYear] = useState(String(new Date().getFullYear()));
+  const [report, setReport] = useState(null);
+
+  const months = ["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر"];
+  const years = ["2024", "2025", "2026", "2027"];
+
+  function generateReport() {
+    if (!selEmp) { toast("اختر موظفاً أولاً", "error"); return; }
+    const emp = employees.find(e => e.id === selEmp);
+    const empShift = shifts?.find(s => s.id === emp?.shiftId);
+    const shiftStart = empShift?.start || settings.workStart;
+    const shiftEnd = empShift?.end || settings.workEnd;
+    const tolerance = empShift ? Number(empShift.tolerance) : Number(settings.lateTolerance);
+    const prefix = `${selYear}-${selMonth}`;
+    const daysInMonth = new Date(Number(selYear), Number(selMonth), 0).getDate();
+    const rows = [];
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dateStr = `${prefix}-${String(d).padStart(2, "0")}`;
+      const dayOfWeek = new Date(dateStr + "T00:00:00").getDay();
+      if (dayOfWeek === 5 || dayOfWeek === 6) continue;
+      const rec = records.find(r => r.employeeId === selEmp && r.date === dateStr);
+      const late = rec ? calcLateMinutes(rec.checkIn, shiftStart, tolerance) : 0;
+      rows.push({
+        date: dateStr,
+        day: dayNameAr(dateStr),
+        checkIn: rec?.checkIn || null,
+        checkOut: rec?.checkOut || null,
+        workHours: rec ? calcWorkHours(rec.checkIn, rec.checkOut) : "-",
+        lateMinutes: late,
+        status: rec ? (late > 0 ? "متأخر" : "حاضر") : "غائب",
+      });
+    }
+    const present = rows.filter(r => r.status !== "غائب").length;
+    const absent = rows.filter(r => r.status === "غائب").length;
+    const late = rows.filter(r => r.status === "متأخر").length;
+    const totalLateMin = rows.reduce((a, r) => a + r.lateMinutes, 0);
+    const totalHoursMin = rows.reduce((a, r) => {
+      if (!r.checkIn || !r.checkOut) return a;
+      const [ih, im] = r.checkIn.split(":").map(Number);
+      const [oh, om] = r.checkOut.split(":").map(Number);
+      return a + (oh * 60 + om) - (ih * 60 + im);
+    }, 0);
+    const attendanceRate = rows.length > 0 ? Math.round((present / rows.length) * 100) : 0;
+    setReport({
+      emp, empShift, rows, present, absent, late, totalLateMin,
+      totalHours: Math.floor(totalHoursMin / 60), totalMin: totalHoursMin % 60,
+      attendanceRate, month: months[Number(selMonth) - 1], year: selYear,
+      shiftStart, shiftEnd, tolerance,
+    });
+  }
+
+  function exportReport() {
+    if (!report) return;
+    const columns = [
+      { key: "date",       header: "التاريخ",         width: 14 },
+      { key: "day",        header: "اليوم",           width: 12 },
+      { key: "checkIn",    header: "الحضور",          width: 10 },
+      { key: "checkOut",   header: "الانصراف",        width: 10 },
+      { key: "workHours",  header: "ساعات العمل",     width: 14 },
+      { key: "lateMinutes",header: "التأخير (دقيقة)", width: 14 },
+      { key: "status",     header: "الحالة",          width: 12 },
+    ];
+    const rows = report.rows.map(r => ({
+      date:        r.date,
+      day:         r.day,
+      checkIn:     r.checkIn || "-",
+      checkOut:    r.checkOut || "-",
+      workHours:   r.workHours,
+      lateMinutes: r.lateMinutes || 0,
+      status:      r.status,
+    }));
+    exportExcel({
+      title: `تقرير شهري — ${report.emp.name}`,
+      subtitle: `${report.month} ${report.year} | ${report.empShift ? report.empShift.name : ""} | دوام ${report.shiftStart}–${report.shiftEnd} | سماح ${report.tolerance}د`,
+      columns, rows,
+      summaryCards: [
+        { label: "أيام الحضور",  value: report.present },
+        { label: "أيام الغياب",  value: report.absent },
+        { label: "أيام التأخير", value: report.late },
+        { label: "إجمالي التأخير", value: `${report.totalLateMin}د` },
+        { label: "إجمالي الساعات", value: `${report.totalHours}س ${report.totalMin}د` },
+        { label: "نسبة الانتظام", value: `${report.attendanceRate}%` },
+      ],
+      filename: `تقرير_${report.emp.name}_${report.month}_${report.year}.xlsx`,
+      sheetName: report.month,
+    });
+    toast("✅ تم تصدير Excel الملون");
+  }
+
+  function printReport() {
+    if (!report) return;
+    const columns = [
+      { key: "date",       header: "التاريخ" },
+      { key: "day",        header: "اليوم" },
+      { key: "checkIn",    header: "الحضور" },
+      { key: "checkOut",   header: "الانصراف" },
+      { key: "workHours",  header: "ساعات العمل" },
+      { key: "lateMinutes",header: "التأخير" },
+      { key: "status",     header: "الحالة" },
+    ];
+    const rows = report.rows.map(r => ({
+      date:        r.date,
+      day:         r.day,
+      checkIn:     r.checkIn || "—",
+      checkOut:    r.checkOut || "—",
+      workHours:   r.workHours,
+      lateMinutes: r.lateMinutes > 0 ? `${r.lateMinutes} د` : "—",
+      status:      r.status,
+    }));
+    exportPDF({
+      title: `تقرير شهري — ${report.emp.name}`,
+      subtitle: `${report.month} ${report.year}  |  ${report.empShift ? report.empShift.name : ""}  |  دوام ${report.shiftStart}–${report.shiftEnd}  |  سماح ${report.tolerance}د`,
+      columns, rows,
+      summaryCards: [
+        { label: "أيام الحضور",    value: report.present,         bg: COLORS.mint,   color: COLORS.green,  border: COLORS.green },
+        { label: "أيام الغياب",    value: report.absent,          bg: COLORS.rose,   color: COLORS.red,    border: COLORS.red },
+        { label: "أيام التأخير",   value: report.late,            bg: COLORS.yellow, color: COLORS.orange, border: COLORS.orange },
+        { label: "إجمالي التأخير", value: `${report.totalLateMin}د`, bg: [245,243,255], color: COLORS.purple, border: COLORS.purple },
+        { label: "إجمالي الساعات", value: `${report.totalHours}س`,  bg: COLORS.altRow, color: COLORS.navy,   border: COLORS.navy },
+        { label: "نسبة الانتظام",  value: `${report.attendanceRate}%`, bg: COLORS.light, color: COLORS.cyan, border: COLORS.cyan },
+      ],
+      filename: `تقرير_${report.emp.name}_${report.month}_${report.year}.pdf`,
+      companyName: settings?.companyName,
+      companyLogo: settings?.companyLogo,
+    });
+    toast("✅ تم فتح نافذة الطباعة");
+  }
+
+  const statusStyle = (s) => ({
+    padding: "2px 8px", borderRadius: 20, fontSize: 11, fontWeight: "700",
+    background: s === "حاضر" ? "#f0fdf4" : s === "متأخر" ? "#fffbeb" : "#fef2f2",
+    color: s === "حاضر" ? "#16a34a" : s === "متأخر" ? "#d97706" : "#dc2626",
+  });
+
+  return (
+    <div>
+      <h2 style={{ margin: "0 0 20px", color: "#1e3a5f", fontSize: 20, fontWeight: "800" }}>📈 التقرير الشهري للموظف</h2>
+
+      <div style={{ background: "white", borderRadius: 14, padding: 20, marginBottom: 20, boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <div>
+            <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>اختر الموظف</label>
+            <select value={selEmp} onChange={e => setSelEmp(e.target.value)}
+              style={{ padding: "9px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial", minWidth: 200 }}>
+              <option value="">— اختر موظفاً —</option>
+              {employees.map(e => {
+                const sh = shifts?.find(s => s.id === e.shiftId);
+                return <option key={e.id} value={e.id}>{e.name}{sh ? ` — ${sh.name}` : ""}</option>;
+              })}
+            </select>
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>الشهر</label>
+            <select value={selMonth} onChange={e => setSelMonth(e.target.value)}
+              style={{ padding: "9px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial" }}>
+              {months.map((m, i) => <option key={i} value={String(i + 1).padStart(2, "0")}>{m}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>السنة</label>
+            <select value={selYear} onChange={e => setSelYear(e.target.value)}
+              style={{ padding: "9px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial" }}>
+              {years.map(y => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </div>
+          <button onClick={generateReport} style={{ padding: "10px 20px", background: "#1e3a5f", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 14, fontFamily: "Cairo, Arial" }}>
+            🔍 عرض التقرير
+          </button>
+        </div>
+      </div>
+
+      {report && (
+        <div>
+          {/* Summary Cards */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, marginBottom: 16 }}>
+            {[
+              { label: "أيام الحضور", val: report.present, color: "#16a34a", icon: "✅" },
+              { label: "أيام الغياب", val: report.absent, color: "#dc2626", icon: "❌" },
+              { label: "أيام التأخير", val: report.late, color: "#d97706", icon: "⚠️" },
+              { label: "إجمالي التأخير", val: `${report.totalLateMin}د`, color: "#9333ea", icon: "⏰" },
+              { label: "إجمالي الساعات", val: `${report.totalHours}س`, color: "#2563a8", icon: "🕐" },
+              { label: "نسبة الانتظام", val: `${report.attendanceRate}%`, color: "#0891b2", icon: "📊" },
+            ].map((s, i) => (
+              <div key={i} style={{ background: "white", borderRadius: 10, padding: "14px 12px", textAlign: "center", boxShadow: "0 2px 8px rgba(0,0,0,0.06)", borderBottom: `3px solid ${s.color}` }}>
+                <div style={{ fontSize: 22, marginBottom: 4 }}>{s.icon}</div>
+                <div style={{ fontSize: 22, fontWeight: "800", color: s.color }}>{s.val}</div>
+                <div style={{ fontSize: 11, color: "#64748b", fontWeight: "600" }}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
+            <div>
+              <h3 style={{ margin: "0 0 4px", color: "#1e3a5f", fontSize: 16 }}>
+                تقرير: <strong>{report.emp.name}</strong> — {report.month} {report.year}
+              </h3>
+              {report.empShift && (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#64748b" }}>
+                  <span style={{ background: `${report.empShift.color}20`, color: report.empShift.color, padding: "2px 10px", borderRadius: 10, fontWeight: "700" }}>
+                    {report.empShift.name}
+                  </span>
+                  <span>🕐 {report.shiftStart} – {report.shiftEnd}</span>
+                  <span>⏱️ سماح {report.tolerance} دقيقة</span>
+                </div>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={exportReport} style={{ padding: "7px 14px", background: "#16a34a", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 13, fontFamily: "Cairo, Arial" }}>📥 Excel</button>
+              <button onClick={printReport} style={{ padding: "7px 14px", background: "#dc2626", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 13, fontFamily: "Cairo, Arial" }}>🖨️ PDF</button>
+            </div>
+          </div>
+
+          <div style={{ background: "white", borderRadius: 14, overflow: "hidden", boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Cairo, Arial" }}>
+                <thead>
+                  <tr style={{ background: "#1e3a5f", color: "white" }}>
+                    {["التاريخ", "اليوم", "الحضور", "الانصراف", "ساعات العمل", "التأخير", "الحالة"].map(h => (
+                      <th key={h} style={{ padding: "11px 12px", textAlign: "right", fontSize: 13, fontWeight: "700" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {report.rows.map((r, i) => (
+                    <tr key={r.date} style={{ background: r.status === "غائب" ? "#fff5f5" : i % 2 === 0 ? "#f8fafc" : "white" }}>
+                      <td style={{ padding: "10px 12px", fontSize: 13, color: "#475569" }}>{r.date}</td>
+                      <td style={{ padding: "10px 12px", fontSize: 13, color: "#475569" }}>{r.day}</td>
+                      <td style={{ padding: "10px 12px", fontWeight: "700", color: "#059669" }}>{r.checkIn || "—"}</td>
+                      <td style={{ padding: "10px 12px", fontWeight: "700", color: "#dc2626" }}>{r.checkOut || "—"}</td>
+                      <td style={{ padding: "10px 12px", fontWeight: "700", color: "#2563a8" }}>{r.workHours}</td>
+                      <td style={{ padding: "10px 12px", fontSize: 13, color: r.lateMinutes > 0 ? "#d97706" : "#94a3b8", fontWeight: "700" }}>
+                        {r.lateMinutes > 0 ? `${r.lateMinutes} دقيقة` : "—"}
+                      </td>
+                      <td style={{ padding: "10px 12px" }}><span style={statusStyle(r.status)}>{r.status}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════
+//  TAB: STATISTICS
+// ══════════════════════════════════════════════
+function TabStatistics({ employees, records, settings }) {
+  const today = getToday();
+  const todayRecs = records.filter(r => r.date === today);
+  const presentToday = todayRecs.length;
+  const absentToday = employees.length - presentToday;
+  const lateToday = todayRecs.filter(r => r.status === "متأخر").length;
+  const checkedOut = todayRecs.filter(r => r.checkOut).length;
+
+  // Last 7 days bar chart data
+  const last7 = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(); d.setDate(d.getDate() - i);
+    const ds = d.toISOString().split("T")[0];
+    const dayRecs = records.filter(r => r.date === ds);
+    last7.push({
+      date: ds,
+      label: ["أحد","اثن","ثلا","أرب","خمس","جمع","سبت"][d.getDay()],
+      present: dayRecs.filter(r => r.status === "حاضر").length,
+      late: dayRecs.filter(r => r.status === "متأخر").length,
+      absent: employees.length - dayRecs.length,
+    });
+  }
+  const maxBar = Math.max(...last7.map(d => d.present + d.late + d.absent), 1);
+
+  // Dept breakdown
+  const depts = {};
+  employees.forEach(e => { depts[e.department || "غير محدد"] = (depts[e.department || "غير محدد"] || 0) + 1; });
+
+  // Top punctual employees this month
+  const monthPrefix = today.slice(0, 7);
+  const empStats = employees.map(e => {
+    const mRecs = records.filter(r => r.employeeId === e.id && r.date.startsWith(monthPrefix));
+    const present = mRecs.filter(r => r.status !== "غائب").length;
+    const late = mRecs.filter(r => r.status === "متأخر").length;
+    const totalLate = mRecs.reduce((a, r) => a + (r.lateMinutes || 0), 0);
+    return { ...e, present, late, totalLate, rate: mRecs.length > 0 ? Math.round((present / mRecs.length) * 100) : 0 };
+  }).sort((a, b) => b.rate - a.rate);
+
+  const statCard = (icon, label, val, color, sub) => (
+    <div style={{ background: "white", borderRadius: 14, padding: "20px 18px", boxShadow: "0 2px 10px rgba(0,0,0,0.06)", borderBottom: `4px solid ${color}` }}>
+      <div style={{ fontSize: 30, marginBottom: 8 }}>{icon}</div>
+      <div style={{ fontSize: 32, fontWeight: "800", color }}>{val}</div>
+      <div style={{ fontSize: 13, color: "#64748b", fontWeight: "700", marginTop: 2 }}>{label}</div>
+      {sub && <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>{sub}</div>}
+    </div>
+  );
+
+  return (
+    <div>
+      <h2 style={{ margin: "0 0 20px", color: "#1e3a5f", fontSize: 20, fontWeight: "800" }}>📊 الإحصائيات والتقارير</h2>
+
+      {/* Today Cards */}
+      <div style={{ marginBottom: 6 }}>
+        <h3 style={{ margin: "0 0 12px", color: "#475569", fontSize: 14, fontWeight: "700", textTransform: "uppercase", letterSpacing: 1 }}>اليوم — {today}</h3>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px,1fr))", gap: 12, marginBottom: 24 }}>
+        {statCard("✅", "حاضر اليوم", presentToday, "#16a34a", `من أصل ${employees.length} موظف`)}
+        {statCard("❌", "غائب اليوم", absentToday, "#dc2626")}
+        {statCard("⚠️", "متأخر اليوم", lateToday, "#d97706")}
+        {statCard("🚪", "انصرف", checkedOut, "#7c3aed", "أكمل يوم العمل")}
+      </div>
+
+      {/* Bar Chart — Last 7 Days */}
+      <div style={{ background: "white", borderRadius: 14, padding: 24, marginBottom: 20, boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+        <h3 style={{ margin: "0 0 20px", color: "#1e3a5f", fontSize: 16, fontWeight: "800" }}>📅 الحضور — آخر 7 أيام</h3>
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 10, height: 180, paddingBottom: 8 }}>
+          {last7.map((d, i) => {
+            const totalH = 160;
+            const pxPerUnit = totalH / maxBar;
+            const presentH = Math.max(d.present * pxPerUnit, d.present > 0 ? 4 : 0);
+            const lateH = Math.max(d.late * pxPerUnit, d.late > 0 ? 4 : 0);
+            const absentH = Math.max(d.absent * pxPerUnit, d.absent > 0 ? 4 : 0);
+            const isToday = d.date === today;
+            return (
+              <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 0 }}>
+                <div style={{ fontSize: 10, color: "#94a3b8", marginBottom: 4, fontWeight: "600" }}>
+                  {d.present + d.late > 0 ? d.present + d.late : ""}
+                </div>
+                <div style={{ width: "100%", display: "flex", flexDirection: "column", alignItems: "stretch", borderRadius: 6, overflow: "hidden", border: isToday ? "2px solid #2563a8" : "none" }}>
+                  {absentH > 0 && <div style={{ height: absentH, background: "#fee2e2", transition: "height 0.5s" }} title={`غائب: ${d.absent}`} />}
+                  {lateH > 0 && <div style={{ height: lateH, background: "#fde68a", transition: "height 0.5s" }} title={`متأخر: ${d.late}`} />}
+                  {presentH > 0 && <div style={{ height: presentH, background: isToday ? "#1e3a5f" : "#3b82f6", transition: "height 0.5s" }} title={`حاضر: ${d.present}`} />}
+                  {(d.present + d.late + d.absent) === 0 && <div style={{ height: 6, background: "#f1f5f9" }} />}
+                </div>
+                <div style={{ fontSize: 11, color: isToday ? "#1e3a5f" : "#64748b", marginTop: 6, fontWeight: isToday ? "800" : "600" }}>{d.label}</div>
+              </div>
+            );
+          })}
+        </div>
+        {/* Legend */}
+        <div style={{ display: "flex", gap: 16, marginTop: 8, justifyContent: "center", flexWrap: "wrap" }}>
+          {[["#3b82f6","حاضر"], ["#fde68a","متأخر"], ["#fee2e2","غائب"]].map(([c, l]) => (
+            <div key={l} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569" }}>
+              <div style={{ width: 12, height: 12, borderRadius: 3, background: c }} />{l}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 20 }}>
+        {/* Dept Breakdown */}
+        <div style={{ background: "white", borderRadius: 14, padding: 20, boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+          <h3 style={{ margin: "0 0 16px", color: "#1e3a5f", fontSize: 15, fontWeight: "800" }}>🏢 توزيع الأقسام</h3>
+          {Object.entries(depts).map(([dept, count], i) => {
+            const pct = Math.round((count / employees.length) * 100);
+            const colors = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#06b6d4"];
+            return (
+              <div key={dept} style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                  <span style={{ fontSize: 13, color: "#374151", fontWeight: "700" }}>{dept}</span>
+                  <span style={{ fontSize: 13, color: "#64748b", fontWeight: "600" }}>{count} موظف ({pct}%)</span>
+                </div>
+                <div style={{ height: 8, background: "#f1f5f9", borderRadius: 99, overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${pct}%`, background: colors[i % colors.length], borderRadius: 99, transition: "width 0.6s" }} />
+                </div>
+              </div>
+            );
+          })}
+          {Object.keys(depts).length === 0 && <p style={{ color: "#94a3b8", fontSize: 13 }}>لا يوجد موظفين</p>}
+        </div>
+
+        {/* Attendance Rate This Month */}
+        <div style={{ background: "white", borderRadius: 14, padding: 20, boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+          <h3 style={{ margin: "0 0 16px", color: "#1e3a5f", fontSize: 15, fontWeight: "800" }}>🏆 الانتظام هذا الشهر</h3>
+          {empStats.length === 0 && <p style={{ color: "#94a3b8", fontSize: 13 }}>لا توجد بيانات</p>}
+          {empStats.map((e, i) => (
+            <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+              <div style={{ width: 28, height: 28, borderRadius: "50%", background: i === 0 ? "#fbbf24" : i === 1 ? "#94a3b8" : i === 2 ? "#d97706" : "#e2e8f0", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: "800", color: i < 3 ? "white" : "#64748b", flexShrink: 0 }}>
+                {i < 3 ? ["🥇","🥈","🥉"][i] : i + 1}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                  <span style={{ fontSize: 13, fontWeight: "700", color: "#1e293b" }}>{e.name}</span>
+                  <span style={{ fontSize: 13, fontWeight: "800", color: e.rate >= 90 ? "#16a34a" : e.rate >= 70 ? "#d97706" : "#dc2626" }}>{e.rate}%</span>
+                </div>
+                <div style={{ height: 6, background: "#f1f5f9", borderRadius: 99, overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${e.rate}%`, background: e.rate >= 90 ? "#16a34a" : e.rate >= 70 ? "#d97706" : "#dc2626", borderRadius: 99, transition: "width 0.6s" }} />
+                </div>
+                <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 2 }}>حضر {e.present} يوم — تأخر {e.totalLate} دقيقة</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Weekly Summary Table */}
+      <div style={{ background: "white", borderRadius: 14, overflow: "hidden", boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+        <div style={{ padding: "16px 20px", borderBottom: "1px solid #f1f5f9" }}>
+          <h3 style={{ margin: 0, color: "#1e3a5f", fontSize: 15, fontWeight: "800" }}>📋 ملخص آخر 7 أيام</h3>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Cairo, Arial" }}>
+            <thead>
+              <tr style={{ background: "#1e3a5f", color: "white" }}>
+                {["التاريخ", "اليوم", "حاضر", "متأخر", "غائب", "نسبة الحضور"].map(h => (
+                  <th key={h} style={{ padding: "11px 14px", textAlign: "right", fontSize: 13, fontWeight: "700" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {[...last7].reverse().map((d, i) => {
+                const total = employees.length;
+                const rate = total > 0 ? Math.round(((d.present + d.late) / total) * 100) : 0;
+                return (
+                  <tr key={d.date} style={{ background: d.date === today ? "#eff6ff" : i % 2 === 0 ? "#f8fafc" : "white", fontWeight: d.date === today ? "700" : "400" }}>
+                    <td style={{ padding: "11px 14px", fontSize: 13, color: "#475569" }}>
+                      {d.date} {d.date === today && <span style={{ background: "#dbeafe", color: "#1d4ed8", fontSize: 10, padding: "1px 6px", borderRadius: 10, marginRight: 4 }}>اليوم</span>}
+                    </td>
+                    <td style={{ padding: "11px 14px", fontSize: 13, color: "#475569" }}>{d.label}</td>
+                    <td style={{ padding: "11px 14px" }}><span style={{ background: "#f0fdf4", color: "#16a34a", padding: "2px 8px", borderRadius: 20, fontSize: 12, fontWeight: "700" }}>{d.present}</span></td>
+                    <td style={{ padding: "11px 14px" }}><span style={{ background: "#fffbeb", color: "#d97706", padding: "2px 8px", borderRadius: 20, fontSize: 12, fontWeight: "700" }}>{d.late}</span></td>
+                    <td style={{ padding: "11px 14px" }}><span style={{ background: "#fef2f2", color: "#dc2626", padding: "2px 8px", borderRadius: 20, fontSize: 12, fontWeight: "700" }}>{d.absent}</span></td>
+                    <td style={{ padding: "11px 14px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <div style={{ flex: 1, height: 8, background: "#f1f5f9", borderRadius: 99, overflow: "hidden", minWidth: 60 }}>
+                          <div style={{ height: "100%", width: `${rate}%`, background: rate >= 80 ? "#16a34a" : rate >= 50 ? "#d97706" : "#dc2626", borderRadius: 99 }} />
+                        </div>
+                        <span style={{ fontSize: 12, fontWeight: "700", color: rate >= 80 ? "#16a34a" : rate >= 50 ? "#d97706" : "#dc2626", minWidth: 36 }}>{rate}%</span>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════
+//  TAB: SETTINGS & BACKUP
+// ══════════════════════════════════════════════
+function TabSettings({ settings, setSettings, employees, setEmployees, records, setRecords, toast, shifts, setShifts }) {
+  const [form, setForm] = useState({ ...settings });
+  const [shiftModal, setShiftModal] = useState(null); // null | "add" | shiftObj
+  const [shiftForm, setShiftForm] = useState({ name: "", start: "09:00", end: "17:00", tolerance: 15, color: "#2563a8" });
+  const [clearModal, setClearModal] = useState(false);
+  const [clearConfirmText, setClearConfirmText] = useState("");
+  const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+  const setSF = (k, v) => setShiftForm(p => ({ ...p, [k]: v }));
+
+  const SHIFT_COLORS = ["#2563a8","#7c3aed","#059669","#dc2626","#d97706","#0891b2","#be185d"];
+  const CLEAR_KEYWORD = "امسح كل شيء";
+
+  function saveSettings() { setSettings(form); toast("✅ تم حفظ الإعدادات"); }
+
+  async function clearAllData() {
+    Object.values(KEYS).forEach(k => localStorage.removeItem(k));
+    const db = window.__fsdb;
+    if (db) {
+      try {
+        const batch = db.batch();
+        for (const col of ["employees","records","settings","shifts"]) {
+          const snap = await db.collection(col).get();
+          snap.docs.forEach(d => batch.delete(d.ref));
+        }
+        await batch.commit();
+      } catch(e) {}
+    }
+    toast("🗑️ تم مسح كل البيانات — جاري إعادة التشغيل...", "error");
+    setTimeout(() => window.location.reload(), 1800);
+  }
+
+  function openAddShift() {
+    setShiftForm({ name: "", start: "09:00", end: "17:00", tolerance: 15, color: "#2563a8" });
+    setShiftModal("add");
+  }
+
+  function openEditShift(sh) {
+    setShiftForm({ ...sh });
+    setShiftModal(sh);
+  }
+
+  function saveShift() {
+    if (!shiftForm.name || !shiftForm.start || !shiftForm.end) { toast("اسم الشيفت ووقت البداية والنهاية مطلوبين", "error"); return; }
+    if (shiftModal === "add") {
+      setShifts(p => [...p, { ...shiftForm, id: generateId(), tolerance: Number(shiftForm.tolerance) }]);
+      toast("✅ تم إضافة الشيفت");
+    } else {
+      setShifts(p => p.map(s => s.id === shiftModal.id ? { ...s, ...shiftForm, tolerance: Number(shiftForm.tolerance) } : s));
+      toast("✅ تم تعديل الشيفت");
+    }
+    setShiftModal(null);
+  }
+
+  function deleteShift(id) {
+    const inUse = employees.some(e => e.shiftId === id);
+    if (inUse) { toast("لا يمكن حذف شيفت مخصص لموظفين!", "error"); return; }
+    setShifts(p => p.filter(s => s.id !== id));
+    toast("🗑️ تم حذف الشيفت", "error");
+  }
+
+  function exportBackup() {
+    const data = { version: "2.0", exportedAt: new Date().toISOString(), employees, records, settings, shifts };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `backup_firebase_${getToday()}_${getTimeNow().replace(":", "-")}.json`; a.click();
+    setSettings(p => ({ ...p, lastBackup: new Date().toISOString() }));
+    toast("✅ تم حفظ النسخة الاحتياطية");
+  }
+
+  function importBackup(e) {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        if (!data.employees || !data.records) { toast("الملف غير صحيح!", "error"); return; }
+        if (!window.confirm(`هل تريد استعادة النسخة الاحتياطية؟\nسيتم استبدال البيانات الحالية!`)) return;
+        localStorage.setItem(KEYS.employees, JSON.stringify(data.employees));
+        localStorage.setItem(KEYS.records, JSON.stringify(data.records));
+        if (data.settings) localStorage.setItem(KEYS.settings, JSON.stringify(data.settings));
+        if (data.shifts) localStorage.setItem(KEYS.shifts, JSON.stringify(data.shifts));
+        toast("✅ تم استعادة البيانات...");
+        setTimeout(() => window.location.reload(), 1500);
+      } catch { toast("خطأ في قراءة الملف!", "error"); }
+    };
+    reader.readAsText(file); e.target.value = "";
+  }
+
+  function exportAllExcel() {
+    const columns = [
+      { key: "name",       header: "الاسم الكامل",   width: 22 },
+      { key: "username",   header: "اسم المستخدم",   width: 16 },
+      { key: "department", header: "القسم",           width: 16 },
+      { key: "shift",      header: "الشيفت",          width: 18 },
+      { key: "phone",      header: "الموبايل",        width: 16 },
+      { key: "createdAt",  header: "تاريخ الإضافة",  width: 14 },
+    ];
+    const rows = employees.map(e => {
+      const sh = shifts.find(s => s.id === e.shiftId);
+      return { name: e.name, username: e.username, department: e.department || "-", shift: sh?.name || "-", phone: e.phone || "-", createdAt: e.createdAt };
+    });
+    exportExcel({
+      title: "بيانات الموظفين",
+      subtitle: `إجمالي ${employees.length} موظف`,
+      columns, rows,
+      summaryCards: [
+        { label: "إجمالي الموظفين", value: employees.length },
+        { label: "عدد الشيفتات", value: shifts.length },
+      ],
+      filename: `بيانات_الموظفين_${getToday()}.xlsx`,
+      sheetName: "الموظفين",
+    });
+    toast("✅ تم تصدير بيانات الموظفين الملونة");
+  }
+
+  return (
+    <div>
+      {/* Shift Form Modal */}
+      {shiftModal && (
+        <Modal title={shiftModal === "add" ? "➕ إضافة شيفت جديد" : "✏️ تعديل الشيفت"} onClose={() => setShiftModal(null)}>
+          <div style={{ marginBottom: 14 }}>
+            <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>اسم الشيفت</label>
+            <input value={shiftForm.name} onChange={e => setSF("name", e.target.value)} placeholder="مثال: الشيفت الصباحي"
+              style={{ width: "100%", padding: "10px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial" }} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+            <div>
+              <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>وقت البداية</label>
+              <input type="time" value={shiftForm.start} onChange={e => setSF("start", e.target.value)}
+                style={{ width: "100%", padding: "10px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial" }} />
+            </div>
+            <div>
+              <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>وقت النهاية</label>
+              <input type="time" value={shiftForm.end} onChange={e => setSF("end", e.target.value)}
+                style={{ width: "100%", padding: "10px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial" }} />
+            </div>
+          </div>
+          <div style={{ marginBottom: 14 }}>
+            <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>دقائق السماح بالتأخير</label>
+            <input type="number" min="0" max="60" value={shiftForm.tolerance} onChange={e => setSF("tolerance", e.target.value)}
+              style={{ width: "100%", padding: "10px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial" }} />
+            <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>
+              مثال: الدوام {shiftForm.start} + {shiftForm.tolerance} دقيقة سماح = التأخير يُحسب بعد {(() => { try { const [h,m] = shiftForm.start.split(":").map(Number); const tot = h*60+m+Number(shiftForm.tolerance); return `${String(Math.floor(tot/60)).padStart(2,"0")}:${String(tot%60).padStart(2,"0")}`; } catch { return "..."; } })()}
+            </div>
+          </div>
+          <div style={{ marginBottom: 18 }}>
+            <label style={{ display: "block", marginBottom: 8, fontSize: 13, fontWeight: "700", color: "#374151" }}>لون الشيفت</label>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {SHIFT_COLORS.map(c => (
+                <button key={c} onClick={() => setSF("color", c)} style={{
+                  width: 32, height: 32, borderRadius: "50%", background: c, border: shiftForm.color === c ? "3px solid #1e293b" : "3px solid transparent",
+                  cursor: "pointer", boxShadow: shiftForm.color === c ? "0 0 0 2px white, 0 0 0 4px " + c : "none",
+                }} />
+              ))}
+            </div>
+          </div>
+          {/* Preview */}
+          <div style={{ background: `${shiftForm.color}12`, border: `2px solid ${shiftForm.color}40`, borderRadius: 10, padding: "10px 14px", marginBottom: 16 }}>
+            <div style={{ fontWeight: "700", color: shiftForm.color, fontSize: 14 }}>{shiftForm.name || "اسم الشيفت"}</div>
+            <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>{shiftForm.start} ← {shiftForm.end} &nbsp;|&nbsp; سماح: {shiftForm.tolerance} دقيقة</div>
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={saveShift} style={{ flex: 1, padding: "11px", background: "#1e3a5f", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontFamily: "Cairo, Arial" }}>
+              {shiftModal === "add" ? "إضافة الشيفت" : "حفظ التعديلات"}
+            </button>
+            <button onClick={() => setShiftModal(null)} style={{ flex: 1, padding: "11px", background: "#f1f5f9", color: "#64748b", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontFamily: "Cairo, Arial" }}>إلغاء</button>
+          </div>
+        </Modal>
+      )}
+
+      <h2 style={{ margin: "0 0 20px", color: "#1e3a5f", fontSize: 20, fontWeight: "800" }}>⚙️ الإعدادات والشيفتات</h2>
+
+      {/* Shifts Management — FULL WIDTH */}
+      <div style={{ background: "white", borderRadius: 14, padding: 24, marginBottom: 20, boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+          <h3 style={{ margin: 0, color: "#1e3a5f", fontSize: 16, fontWeight: "800" }}>🕐 إدارة الشيفتات</h3>
+          <button onClick={openAddShift} style={{ padding: "8px 16px", background: "#1e3a5f", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 13, fontFamily: "Cairo, Arial" }}>
+            ➕ شيفت جديد
+          </button>
+        </div>
+        {shifts.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "24px", color: "#94a3b8", fontSize: 14 }}>لا توجد شيفتات — اضغط "شيفت جديد" لإضافة أول شيفت</div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px,1fr))", gap: 14 }}>
+            {shifts.map(sh => {
+              const assigned = employees.filter(e => e.shiftId === sh.id).length;
+              return (
+                <div key={sh.id} style={{ border: `2px solid ${sh.color}30`, borderRadius: 14, padding: "16px 18px", background: `${sh.color}06`, position: "relative" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                    <div style={{ width: 14, height: 14, borderRadius: "50%", background: sh.color, flexShrink: 0 }} />
+                    <div style={{ fontWeight: "800", fontSize: 15, color: "#1e293b" }}>{sh.name}</div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
+                    {[
+                      { label: "البداية", val: sh.start, icon: "🟢" },
+                      { label: "النهاية", val: sh.end, icon: "🔴" },
+                      { label: "السماح", val: `${sh.tolerance}د`, icon: "⏱️" },
+                    ].map(s => (
+                      <div key={s.label} style={{ background: "white", borderRadius: 8, padding: "8px", textAlign: "center", boxShadow: "0 1px 4px rgba(0,0,0,0.06)" }}>
+                        <div style={{ fontSize: 14 }}>{s.icon}</div>
+                        <div style={{ fontSize: 14, fontWeight: "800", color: sh.color }}>{s.val}</div>
+                        <div style={{ fontSize: 10, color: "#94a3b8", fontWeight: "600" }}>{s.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: 12, color: "#64748b", background: "#f1f5f9", padding: "3px 10px", borderRadius: 20, fontWeight: "600" }}>
+                      👥 {assigned} موظف
+                    </span>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={() => openEditShift(sh)} style={{ padding: "5px 10px", background: "#eff6ff", color: "#2563a8", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: "700", fontFamily: "Cairo, Arial" }}>✏️ تعديل</button>
+                      <button onClick={() => deleteShift(sh.id)} style={{ padding: "5px 10px", background: "#fef2f2", color: "#dc2626", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: "700", fontFamily: "Cairo, Arial" }}>🗑️</button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+        {/* General Settings */}
+        <div style={{ background: "white", borderRadius: 14, padding: 24, boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+          <h3 style={{ margin: "0 0 18px", color: "#1e3a5f", fontSize: 16, fontWeight: "800" }}>🏢 الإعدادات العامة</h3>
+          {[
+            { key: "companyName", label: "اسم الشركة", type: "text" },
+            { key: "adminUsername", label: "يوزر المدير", type: "text" },
+            { key: "adminPassword", label: "باسورد المدير", type: "password" },
+          ].map(f => (
+            <div key={f.key} style={{ marginBottom: 14 }}>
+              <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>{f.label}</label>
+              <input value={form[f.key] || ""} onChange={e => set(f.key, e.target.value)} type={f.type}
+                style={{ width: "100%", padding: "9px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial" }}
+                onFocus={e => e.target.style.borderColor = "#2563a8"}
+                onBlur={e => e.target.style.borderColor = "#e2e8f0"}
+              />
+            </div>
+          ))}
+
+          {/* Logo Upload */}
+          <div style={{ marginBottom: 14 }}>
+            <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>شعار الشركة (Logo)</label>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", border: "2px dashed #e2e8f0", borderRadius: 10, background: "#fafafa" }}>
+              {form.companyLogo
+                ? <img src={form.companyLogo} style={{ height: 48, maxWidth: 120, objectFit: "contain", borderRadius: 6 }} alt="logo" />
+                : <div style={{ fontSize: 32 }}>🏢</div>}
+              <div style={{ flex: 1 }}>
+                <label style={{ display: "inline-block", padding: "7px 14px", background: "#1e3a5f", color: "white", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: "700", fontFamily: "Cairo, Arial" }}>
+                  📁 رفع شعار
+                  <input type="file" accept="image/*" style={{ display: "none" }} onChange={e => {
+                    const file = e.target.files[0]; if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = ev => set("companyLogo", ev.target.result);
+                    reader.readAsDataURL(file);
+                    e.target.value = "";
+                  }} />
+                </label>
+                {form.companyLogo && (
+                  <button onClick={() => set("companyLogo", null)} style={{ marginRight: 8, padding: "7px 12px", background: "#fef2f2", color: "#dc2626", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: "700", fontFamily: "Cairo, Arial" }}>
+                    🗑️ حذف
+                  </button>
+                )}
+                <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 5 }}>PNG أو JPG — يظهر في PDF والتقارير</div>
+              </div>
+            </div>
+          </div>
+          <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "#92400e" }}>
+            💡 وقت الدوام الافتراضي يُستخدم فقط للموظفين غير المخصص لهم شيفت
+          </div>
+          {[
+            { key: "workStart", label: "بداية الدوام الافتراضي", type: "time" },
+            { key: "workEnd", label: "نهاية الدوام الافتراضي", type: "time" },
+            { key: "lateTolerance", label: "دقائق السماح الافتراضية", type: "number" },
+          ].map(f => (
+            <div key={f.key} style={{ marginBottom: 14 }}>
+              <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>{f.label}</label>
+              <input value={form[f.key] || ""} onChange={e => set(f.key, e.target.value)} type={f.type}
+                style={{ width: "100%", padding: "9px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial" }} />
+            </div>
+          ))}
+          <button onClick={saveSettings} style={{ width: "100%", padding: "11px", background: "#1e3a5f", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 15, fontFamily: "Cairo, Arial" }}>
+            💾 حفظ الإعدادات
+          </button>
+        </div>
+
+        {/* Backup */}
+        <div style={{ background: "white", borderRadius: 14, padding: 24, boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+          <h3 style={{ margin: "0 0 18px", color: "#1e3a5f", fontSize: 16, fontWeight: "800" }}>💾 النسخ الاحتياطي</h3>
+          {settings.lastBackup && (
+            <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: "10px 14px", marginBottom: 16, fontSize: 13, color: "#16a34a" }}>
+              ✅ آخر نسخة: {new Date(settings.lastBackup).toLocaleString("ar-EG")}
+            </div>
+          )}
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <button onClick={exportBackup} style={{ padding: "12px", background: "#1e3a5f", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 14, fontFamily: "Cairo, Arial", textAlign: "right" }}>
+              💾 حفظ نسخة احتياطية (JSON)
+            </button>
+            <button onClick={exportAllExcel} style={{ padding: "12px", background: "#16a34a", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 14, fontFamily: "Cairo, Arial", textAlign: "right" }}>
+              📤 تصدير كل البيانات (Excel)
+            </button>
+            <label style={{ padding: "12px", background: "#2563a8", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 14, fontFamily: "Cairo, Arial", textAlign: "right", display: "block" }}>
+              📥 استعادة من نسخة احتياطية
+              <input type="file" accept=".json" onChange={importBackup} style={{ display: "none" }} />
+            </label>
+          </div>
+          <div style={{ marginTop: 16, background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "12px 14px", fontSize: 12, color: "#92400e" }}>
+            <strong>💡 تلميح:</strong> النسخة الاحتياطية تشمل الموظفين + السجلات + الشيفتات + الإعدادات.
+          </div>
+
+          {/* Danger Zone */}
+          <div style={{ marginTop: 20, border: "2px solid #fca5a5", borderRadius: 12, overflow: "hidden" }}>
+            <div style={{ background: "#fef2f2", padding: "12px 16px", borderBottom: "1px solid #fca5a5", display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 18 }}>⚠️</span>
+              <span style={{ fontWeight: "800", color: "#dc2626", fontSize: 14 }}>منطقة الخطر</span>
+            </div>
+            <div style={{ padding: 16 }}>
+              <p style={{ fontSize: 12, color: "#64748b", margin: "0 0 12px", lineHeight: 1.7 }}>
+                مسح كل البيانات يشمل: <strong>جميع الموظفين، كل سجلات الحضور، الشيفتات، والإعدادات</strong>.<br/>
+                هذا الإجراء <strong style={{ color: "#dc2626" }}>لا يمكن التراجع عنه</strong> — يُنصح بعمل نسخة احتياطية أولاً.
+              </p>
+              <button onClick={() => { setClearConfirmText(""); setClearModal(true); }} style={{
+                width: "100%", padding: "11px", background: "#dc2626", color: "white",
+                border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer",
+                fontSize: 14, fontFamily: "Cairo, Arial", letterSpacing: 0.3,
+              }}>
+                🗑️ مسح كل بيانات البرنامج
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Clear All Data Modal ── */}
+      {clearModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div style={{ background: "white", borderRadius: 18, width: "100%", maxWidth: 460, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", overflow: "hidden", fontFamily: "Cairo, Arial", direction: "rtl" }}>
+            {/* Modal Header */}
+            <div style={{ background: "linear-gradient(135deg,#dc2626,#b91c1c)", padding: "20px 24px", display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 48, height: 48, background: "rgba(255,255,255,0.2)", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, flexShrink: 0 }}>⚠️</div>
+              <div>
+                <div style={{ color: "white", fontWeight: "900", fontSize: 18 }}>تحذير — حذف نهائي</div>
+                <div style={{ color: "rgba(255,255,255,0.8)", fontSize: 12, marginTop: 3 }}>هذا الإجراء لا يمكن التراجع عنه</div>
+              </div>
+            </div>
+
+            {/* Modal Body */}
+            <div style={{ padding: "24px" }}>
+              <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 10, padding: "14px 16px", marginBottom: 20, fontSize: 13, color: "#9a3412", lineHeight: 1.8 }}>
+                سيتم حذف:
+                <ul style={{ margin: "8px 0 0 0", paddingRight: 20 }}>
+                  <li>👥 كل الموظفين ({employees.length} موظف)</li>
+                  <li>📋 كل سجلات الحضور ({records.length} سجل)</li>
+                  <li>🕐 كل الشيفتات ({shifts.length} شيفت)</li>
+                  <li>⚙️ جميع الإعدادات</li>
+                </ul>
+              </div>
+
+              <div style={{ marginBottom: 20 }}>
+                <label style={{ display: "block", fontSize: 13, fontWeight: "700", color: "#374151", marginBottom: 8 }}>
+                  للتأكيد، اكتب: <span style={{ color: "#dc2626", background: "#fee2e2", padding: "2px 8px", borderRadius: 5, fontFamily: "monospace" }}>امسح كل شيء</span>
+                </label>
+                <input
+                  value={clearConfirmText}
+                  onChange={e => setClearConfirmText(e.target.value)}
+                  placeholder="اكتب عبارة التأكيد هنا..."
+                  style={{ width: "100%", padding: "10px 14px", border: `2px solid ${clearConfirmText === CLEAR_KEYWORD ? "#16a34a" : "#e2e8f0"}`, borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial", outline: "none", transition: "border-color 0.2s" }}
+                  autoFocus
+                />
+              </div>
+
+              <div style={{ display: "flex", gap: 10 }}>
+                <button onClick={() => setClearModal(false)} style={{
+                  flex: 1, padding: "11px", background: "#f1f5f9", color: "#475569",
+                  border: "2px solid #e2e8f0", borderRadius: 8, fontWeight: "700",
+                  cursor: "pointer", fontSize: 14, fontFamily: "Cairo, Arial",
+                }}>
+                  إلغاء
+                </button>
+                <button
+                  onClick={() => { if (clearConfirmText === CLEAR_KEYWORD) { setClearModal(false); clearAllData(); } }}
+                  disabled={clearConfirmText !== CLEAR_KEYWORD}
+                  style={{
+                    flex: 1, padding: "11px", border: "none", borderRadius: 8, fontWeight: "700",
+                    cursor: clearConfirmText === CLEAR_KEYWORD ? "pointer" : "not-allowed",
+                    fontSize: 14, fontFamily: "Cairo, Arial", transition: "all 0.2s",
+                    background: clearConfirmText === CLEAR_KEYWORD ? "#dc2626" : "#fca5a5",
+                    color: "white",
+                  }}
+                >
+                  🗑️ نعم، امسح كل البيانات
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════
+//  ADMIN DASHBOARD
+// ══════════════════════════════════════════════
+function AdminDashboard({ user, onLogout, db }) {
+  const [tab, setTab] = useState("employees");
+  const { employees, setEmployees, records, setRecords, settings, setSettings, shifts, setShifts } = db;
+  const { toasts, show: toast } = useToast();
+
+  const tabs = [
+    { id: "employees", label: "👥 الموظفين" },
+    { id: "attendance", label: "📊 الحضور" },
+    { id: "manual", label: "📝 إدخال يدوي" },
+    { id: "report", label: "📈 التقرير الشهري" },
+    { id: "statistics", label: "🏆 الإحصائيات" },
+    { id: "settings", label: "⚙️ الإعدادات" },
+  ];
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#f1f5f9", fontFamily: "Cairo, Arial", direction: "rtl", display: "flex" }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap'); *{box-sizing:border-box}`}</style>
+      <Toast toasts={toasts} />
+
+      {/* Sidebar */}
+      <div style={{ width: 220, background: "#1e3a5f", minHeight: "100vh", padding: "20px 12px", display: "flex", flexDirection: "column", flexShrink: 0 }}>
+        <div style={{ textAlign: "center", marginBottom: 28, padding: "0 8px" }}>
+          <div style={{ fontSize: 36, marginBottom: 6 }}>
+            {settings.companyLogo
+              ? <img src={settings.companyLogo} style={{ height: 48, maxWidth: 160, objectFit: "contain", borderRadius: 8 }} alt="logo" />
+              : "🏢"}
+          </div>
+          <div style={{ color: "white", fontWeight: "800", fontSize: 14, lineHeight: 1.4 }}>{settings.companyName}</div>
+          <div style={{ color: "#94b8e0", fontSize: 12, marginTop: 4 }}>لوحة المدير</div>
+        </div>
+
+        {/* Quick Save Button */}
+        <div style={{ marginBottom: 16, padding: "0 2px" }}>
+          <button onClick={() => {
+            const data = {
+              version: "1.0",
+              exportedAt: new Date().toISOString(),
+              employees: JSON.parse(localStorage.getItem(KEYS.employees) || "[]"),
+              records: JSON.parse(localStorage.getItem(KEYS.records) || "[]"),
+              settings: JSON.parse(localStorage.getItem(KEYS.settings) || "{}"),
+              shifts: JSON.parse(localStorage.getItem(KEYS.shifts) || "[]"),
+            };
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            const now = new Date();
+            a.download = `backup_${now.toISOString().slice(0,10)}_${String(now.getHours()).padStart(2,"0")}-${String(now.getMinutes()).padStart(2,"0")}.json`;
+            a.click();
+            toast("تم تحميل ملف البيانات — احتفظ بيه!");
+          }} style={{
+            width: "100%", padding: "10px 14px", background: "#16a34a", color: "white",
+            border: "none", borderRadius: 10, fontWeight: "700", fontSize: 13,
+            fontFamily: "Cairo, Arial", cursor: "pointer", textAlign: "center",
+            boxShadow: "0 2px 8px rgba(22,163,74,0.4)",
+          }}>
+            💾 حفظ البيانات الآن
+          </button>
+        </div>
+
+        <nav style={{ flex: 1 }}>
+          {tabs.map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)} style={{
+              width: "100%", padding: "11px 14px", marginBottom: 4, border: "none", borderRadius: 10,
+              textAlign: "right", cursor: "pointer", fontWeight: "700", fontSize: 14, fontFamily: "Cairo, Arial",
+              transition: "all 0.2s",
+              background: tab === t.id ? "rgba(255,255,255,0.15)" : "transparent",
+              color: tab === t.id ? "white" : "rgba(255,255,255,0.6)",
+              borderRight: tab === t.id ? "3px solid #60a5fa" : "3px solid transparent",
+            }}>{t.label}</button>
+          ))}
+        </nav>
+
+        <button onClick={onLogout} style={{
+          width: "100%", padding: "10px", background: "rgba(239,68,68,0.15)", color: "#fca5a5",
+          border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, fontWeight: "700", cursor: "pointer",
+          fontSize: 13, fontFamily: "Cairo, Arial", marginTop: "auto"
+        }}>🚪 تسجيل الخروج</button>
+      </div>
+
+      {/* Main */}
+      <div style={{ flex: 1, padding: 24, overflowY: "auto" }}>
+        <div style={{ marginBottom: 20, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <p style={{ margin: 0, color: "#64748b", fontSize: 13 }}>{new Date().toLocaleDateString("ar-EG", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</p>
+          </div>
+          <div style={{ background: "white", borderRadius: 10, padding: "8px 14px", fontSize: 13, color: "#475569", fontWeight: "600", boxShadow: "0 2px 6px rgba(0,0,0,0.06)" }}>
+            👑 مرحباً، المدير
+          </div>
+        </div>
+
+        {tab === "employees" && <TabEmployees employees={employees} setEmployees={setEmployees} records={records} toast={toast} shifts={shifts} />}
+        {tab === "attendance" && <TabAttendance employees={employees} records={records} toast={toast} settings={settings} />}
+        {tab === "manual" && <TabManualAttendance employees={employees} records={records} setRecords={setRecords} settings={settings} shifts={shifts} toast={toast} />}
+        {tab === "report" && <TabMonthlyReport employees={employees} records={records} settings={settings} toast={toast} shifts={shifts} />}
+        {tab === "statistics" && <TabStatistics employees={employees} records={records} settings={settings} />}
+        {tab === "settings" && <TabSettings settings={settings} setSettings={setSettings} employees={employees} setEmployees={setEmployees} records={records} setRecords={setRecords} toast={toast} shifts={shifts} setShifts={setShifts} />}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════
+//  EMPLOYEE DASHBOARD
+// ══════════════════════════════════════════════
+function EmployeeDashboard({ user, onLogout, db }) {
+  const { records, setRecords, settings, shifts } = db;
+  const { toasts, show: toast } = useToast();
+  const [time, setTime] = useState(new Date());
+  const [empTab, setEmpTab] = useState("home");
+  const today = getToday();
+  const todayRec = records.find(r => r.employeeId === user.id && r.date === today);
+
+  useEffect(() => {
+    const t = setInterval(() => setTime(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Get employee's assigned shift (fallback to settings defaults)
+  const empShift = shifts?.find(s => s.id === user.shiftId);
+  const shiftStart = empShift?.start || settings.workStart;
+  const shiftEnd = empShift?.end || settings.workEnd;
+  const shiftTolerance = empShift ? Number(empShift.tolerance) : Number(settings.lateTolerance);
+
+  function checkIn() {
+    if (todayRec) { toast("سبق تسجيل الحضور اليوم!", "error"); return; }
+    const now = getTimeNow();
+    const late = calcLateMinutes(now, shiftStart, shiftTolerance);
+    const rec = { id: generateId(), employeeId: user.id, date: today, checkIn: now, checkOut: null, status: late > 0 ? "متأخر" : "حاضر", lateMinutes: late, shiftId: user.shiftId || null };
+    setRecords(p => [...p, rec]);
+    toast(late > 0 ? `⚠️ تم تسجيل الحضور — متأخر ${late} دقيقة` : "✅ تم تسجيل الحضور بنجاح");
+  }
+
+  function checkOut() {
+    if (!todayRec) { toast("سجّل حضورك أولاً!", "error"); return; }
+    if (todayRec.checkOut) { toast("سبق تسجيل الانصراف اليوم!", "error"); return; }
+    setRecords(p => p.map(r => r.id === todayRec.id ? { ...r, checkOut: getTimeNow() } : r));
+    toast("✅ تم تسجيل الانصراف بنجاح");
+  }
+
+  const myRecords = records.filter(r => r.employeeId === user.id).sort((a, b) => b.date.localeCompare(a.date));
+  const last30 = myRecords.slice(0, 30);
+  const thisMonth = myRecords.filter(r => r.date.startsWith(today.slice(0, 7)));
+  const presentCount = thisMonth.filter(r => r.status !== "غائب").length;
+  const lateCount = thisMonth.filter(r => r.status === "متأخر").length;
+  const totalMinutes = thisMonth.reduce((a, r) => {
+    if (!r.checkIn || !r.checkOut) return a;
+    const [ih, im] = r.checkIn.split(":").map(Number);
+    const [oh, om] = r.checkOut.split(":").map(Number);
+    return a + (oh * 60 + om) - (ih * 60 + im);
+  }, 0);
+  const totalHours = Math.floor(totalMinutes / 60);
+  const totalMins = totalMinutes % 60;
+
+  const statusStyle = (s) => ({
+    padding: "2px 8px", borderRadius: 20, fontSize: 11, fontWeight: "700",
+    background: s === "حاضر" ? "#f0fdf4" : s === "متأخر" ? "#fffbeb" : "#fef2f2",
+    color: s === "حاضر" ? "#16a34a" : s === "متأخر" ? "#d97706" : "#dc2626",
+  });
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#f1f5f9", fontFamily: "Cairo, Arial", direction: "rtl" }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap'); *{box-sizing:border-box} @keyframes slideDown{from{opacity:0;transform:translateY(-20px)}to{opacity:1;transform:translateY(0)}} @keyframes pulse2{0%,100%{transform:scale(1)}50%{transform:scale(1.03)}}`}</style>
+      <Toast toasts={toasts} />
+
+      {/* Header */}
+      <div style={{ background: "linear-gradient(135deg, #1e3a5f, #2563a8)", padding: "20px 24px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div>
+            <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 13 }}>مرحباً،</div>
+            <div style={{ color: "white", fontWeight: "800", fontSize: 20 }}>{user.name}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
+              <div style={{ color: "#94b8e0", fontSize: 12 }}>{user.department}</div>
+              {empShift && (
+                <span style={{ background: `${empShift.color}`, color: "white", padding: "1px 8px", borderRadius: 10, fontSize: 11, fontWeight: "700" }}>
+                  {empShift.name}
+                </span>
+              )}
+            </div>
+            {empShift && (
+              <div style={{ color: "rgba(255,255,255,0.55)", fontSize: 11, marginTop: 2 }}>
+                🕐 {empShift.start} – {empShift.end} &nbsp;|&nbsp; سماح {empShift.tolerance}د
+              </div>
+            )}
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ color: "white", fontWeight: "800", fontSize: 26, fontVariantNumeric: "tabular-nums" }}>
+              {time.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+            </div>
+            <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 12 }}>
+              {time.toLocaleDateString("ar-EG", { weekday: "long", month: "long", day: "numeric" })}
+            </div>
+          </div>
+          <button onClick={onLogout} style={{ padding: "8px 16px", background: "rgba(255,255,255,0.15)", color: "white", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 13, fontFamily: "Cairo, Arial" }}>
+            🚪 خروج
+          </button>
+        </div>
+        {/* Employee Tabs */}
+        <div style={{ display: "flex", gap: 6 }}>
+          {[{ id: "home", label: "🏠 الرئيسية" }, { id: "history", label: "📋 السجل" }, { id: "summary", label: "📊 ملخصي" }].map(t => (
+            <button key={t.id} onClick={() => setEmpTab(t.id)} style={{
+              padding: "7px 14px", border: "none", borderRadius: 8, cursor: "pointer",
+              fontWeight: "700", fontSize: 13, fontFamily: "Cairo, Arial",
+              background: empTab === t.id ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.08)",
+              color: empTab === t.id ? "white" : "rgba(255,255,255,0.6)",
+              borderBottom: empTab === t.id ? "2px solid white" : "2px solid transparent",
+            }}>{t.label}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ padding: 20, maxWidth: 720, margin: "0 auto" }}>
+
+        {/* HOME TAB */}
+        {empTab === "home" && (
+          <>
+            {/* Check In/Out Card */}
+            <div style={{ background: "white", borderRadius: 16, padding: 28, marginBottom: 16, boxShadow: "0 4px 20px rgba(0,0,0,0.08)", textAlign: "center" }}>
+              <h3 style={{ margin: "0 0 18px", color: "#1e3a5f", fontSize: 18, fontWeight: "800" }}>تسجيل الحضور والانصراف</h3>
+
+              {todayRec ? (
+                <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 12, padding: "14px 20px", marginBottom: 18 }}>
+                  <div style={{ fontSize: 13, color: "#16a34a", fontWeight: "700" }}>
+                    ✅ حضور: <strong>{todayRec.checkIn}</strong>
+                    {todayRec.checkOut ? <> &nbsp;|&nbsp; 🚪 انصراف: <strong>{todayRec.checkOut}</strong> &nbsp;|&nbsp; ⏱️ {calcWorkHours(todayRec.checkIn, todayRec.checkOut)}</> : " — في انتظار الانصراف"}
+                  </div>
+                  {todayRec.lateMinutes > 0 && <div style={{ fontSize: 12, color: "#d97706", marginTop: 4 }}>⚠️ تأخير: {todayRec.lateMinutes} دقيقة</div>}
+                </div>
+              ) : (
+                <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 12, padding: "12px 16px", marginBottom: 18, fontSize: 13, color: "#92400e" }}>
+                  ⚠️ لم يتم تسجيل الحضور — وقت الدوام: <strong>{shiftStart}</strong>
+                  {empShift && <span style={{ marginRight: 8, background: `${empShift.color}20`, color: empShift.color, padding: "2px 8px", borderRadius: 10, fontSize: 12, fontWeight: "700" }}>{empShift.name}</span>}
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 14, justifyContent: "center" }}>
+                <button onClick={checkIn} disabled={!!todayRec} style={{
+                  padding: "15px 30px", border: "none", borderRadius: 14, fontWeight: "800", fontSize: 16, cursor: todayRec ? "not-allowed" : "pointer", fontFamily: "Cairo, Arial",
+                  background: todayRec ? "#e2e8f0" : "linear-gradient(135deg,#16a34a,#22c55e)", color: todayRec ? "#94a3b8" : "white",
+                  boxShadow: todayRec ? "none" : "0 6px 18px rgba(22,163,74,0.4)", animation: !todayRec ? "pulse2 2s ease-in-out infinite" : "none",
+                }}>✅ تسجيل حضور</button>
+                <button onClick={checkOut} disabled={!todayRec || !!todayRec?.checkOut} style={{
+                  padding: "15px 30px", border: "none", borderRadius: 14, fontWeight: "800", fontSize: 16, cursor: (!todayRec || todayRec?.checkOut) ? "not-allowed" : "pointer", fontFamily: "Cairo, Arial",
+                  background: (!todayRec || todayRec?.checkOut) ? "#e2e8f0" : "linear-gradient(135deg,#dc2626,#ef4444)", color: (!todayRec || todayRec?.checkOut) ? "#94a3b8" : "white",
+                  boxShadow: (!todayRec || todayRec?.checkOut) ? "none" : "0 6px 18px rgba(220,38,38,0.4)",
+                }}>🚪 تسجيل انصراف</button>
+              </div>
+            </div>
+
+            {/* This Month Quick Stats */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10 }}>
+              {[
+                { label: "أيام الحضور", val: presentCount, color: "#16a34a", icon: "✅" },
+                { label: "أيام التأخير", val: lateCount, color: "#d97706", icon: "⚠️" },
+                { label: "سجلات الشهر", val: thisMonth.length, color: "#2563a8", icon: "📅" },
+                { label: "ساعات الشهر", val: `${totalHours}س`, color: "#7c3aed", icon: "⏱️" },
+              ].map((s, i) => (
+                <div key={i} style={{ background: "white", borderRadius: 12, padding: "14px 10px", textAlign: "center", boxShadow: "0 2px 8px rgba(0,0,0,0.06)" }}>
+                  <div style={{ fontSize: 20 }}>{s.icon}</div>
+                  <div style={{ fontSize: 20, fontWeight: "800", color: s.color, marginTop: 4 }}>{s.val}</div>
+                  <div style={{ fontSize: 10, color: "#64748b", fontWeight: "600", marginTop: 2 }}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* HISTORY TAB */}
+        {empTab === "history" && (
+          <div style={{ background: "white", borderRadius: 14, overflow: "hidden", boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+            <div style={{ padding: "16px 18px", borderBottom: "1px solid #f1f5f9", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <h3 style={{ margin: 0, color: "#1e3a5f", fontSize: 16, fontWeight: "800" }}>📋 سجل الحضور (آخر 30 يوم)</h3>
+              <span style={{ fontSize: 12, color: "#94a3b8" }}>{last30.length} سجل</span>
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Cairo, Arial" }}>
+                <thead>
+                  <tr style={{ background: "#f8fafc" }}>
+                    {["التاريخ", "اليوم", "الحضور", "الانصراف", "ساعات العمل", "التأخير", "الحالة"].map(h => (
+                      <th key={h} style={{ padding: "10px 12px", textAlign: "right", fontSize: 12, fontWeight: "700", color: "#64748b" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {last30.length === 0 ? (
+                    <tr><td colSpan={7} style={{ textAlign: "center", padding: 24, color: "#94a3b8" }}>لا توجد سجلات</td></tr>
+                  ) : last30.map((r, i) => (
+                    <tr key={r.id} style={{ borderTop: "1px solid #f1f5f9", background: i % 2 === 0 ? "#f8fafc" : "white" }}>
+                      <td style={{ padding: "10px 12px", fontSize: 12, color: "#475569" }}>{r.date}</td>
+                      <td style={{ padding: "10px 12px", fontSize: 12, color: "#475569" }}>{dayNameAr(r.date)}</td>
+                      <td style={{ padding: "10px 12px", fontWeight: "700", color: "#059669", fontSize: 13 }}>{r.checkIn}</td>
+                      <td style={{ padding: "10px 12px", fontWeight: "700", color: "#dc2626", fontSize: 13 }}>{r.checkOut || "—"}</td>
+                      <td style={{ padding: "10px 12px", fontWeight: "700", color: "#2563a8", fontSize: 13 }}>{calcWorkHours(r.checkIn, r.checkOut)}</td>
+                      <td style={{ padding: "10px 12px", fontSize: 12, color: r.lateMinutes > 0 ? "#d97706" : "#94a3b8", fontWeight: "700" }}>{r.lateMinutes > 0 ? `${r.lateMinutes}د` : "—"}</td>
+                      <td style={{ padding: "10px 12px" }}><span style={statusStyle(r.status)}>{r.status}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* SUMMARY TAB */}
+        {empTab === "summary" && (
+          <div>
+            <div style={{ background: "white", borderRadius: 14, padding: 20, marginBottom: 16, boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+              <h3 style={{ margin: "0 0 16px", color: "#1e3a5f", fontSize: 16, fontWeight: "800" }}>📊 ملخص الشهر الحالي</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 16 }}>
+                {[
+                  { label: "أيام الحضور", val: presentCount, color: "#16a34a", icon: "✅" },
+                  { label: "أيام الغياب", val: Math.max(0, 22 - presentCount), color: "#dc2626", icon: "❌" },
+                  { label: "أيام التأخير", val: lateCount, color: "#d97706", icon: "⚠️" },
+                  { label: "إجمالي الساعات", val: `${totalHours}س ${totalMins}د`, color: "#2563a8", icon: "⏱️" },
+                  { label: "إجمالي التأخير", val: `${thisMonth.reduce((a, r) => a + (r.lateMinutes || 0), 0)}د`, color: "#9333ea", icon: "⏰" },
+                  { label: "نسبة الانتظام", val: `${thisMonth.length > 0 ? Math.round((presentCount / thisMonth.length) * 100) : 0}%`, color: "#0891b2", icon: "📈" },
+                ].map((s, i) => (
+                  <div key={i} style={{ background: "#f8fafc", borderRadius: 10, padding: "14px 10px", textAlign: "center", borderBottom: `3px solid ${s.color}` }}>
+                    <div style={{ fontSize: 22 }}>{s.icon}</div>
+                    <div style={{ fontSize: 18, fontWeight: "800", color: s.color, marginTop: 4 }}>{s.val}</div>
+                    <div style={{ fontSize: 11, color: "#64748b", fontWeight: "600", marginTop: 2 }}>{s.label}</div>
+                  </div>
+                ))}
+              </div>
+              {/* Attendance rate bar */}
+              <div style={{ background: "#f1f5f9", borderRadius: 10, padding: "12px 16px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, fontSize: 13, fontWeight: "700", color: "#374151" }}>
+                  <span>نسبة الانتظام</span>
+                  <span style={{ color: "#1e3a5f" }}>{thisMonth.length > 0 ? Math.round((presentCount / thisMonth.length) * 100) : 0}%</span>
+                </div>
+                <div style={{ height: 12, background: "#e2e8f0", borderRadius: 99, overflow: "hidden" }}>
+                  <div style={{
+                    height: "100%", borderRadius: 99, transition: "width 0.8s",
+                    width: `${thisMonth.length > 0 ? Math.round((presentCount / thisMonth.length) * 100) : 0}%`,
+                    background: "linear-gradient(90deg, #1e3a5f, #3b82f6)"
+                  }} />
+                </div>
+              </div>
+            </div>
+
+            {/* Last 7 days mini chart */}
+            <div style={{ background: "white", borderRadius: 14, padding: 20, boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+              <h3 style={{ margin: "0 0 16px", color: "#1e3a5f", fontSize: 15, fontWeight: "800" }}>📅 آخر 7 أيام</h3>
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-end", height: 100 }}>
+                {(() => {
+                  const days = [];
+                  for (let i = 6; i >= 0; i--) {
+                    const d = new Date(); d.setDate(d.getDate() - i);
+                    const ds = d.toISOString().split("T")[0];
+                    const rec = records.find(r => r.employeeId === user.id && r.date === ds);
+                    days.push({ ds, rec, label: ["أحد","اثن","ثلا","أرب","خمس","جمع","سبت"][d.getDay()], isToday: ds === today });
+                  }
+                  return days.map((d, i) => (
+                    <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center" }}>
+                      <div style={{ width: "100%", height: 70, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+                        <div style={{
+                          width: "80%", borderRadius: 6,
+                          height: d.rec ? (d.rec.checkOut ? "100%" : "60%") : "15%",
+                          background: d.rec ? (d.rec.status === "متأخر" ? "#fde68a" : "#3b82f6") : "#fee2e2",
+                          border: d.isToday ? "2px solid #1e3a5f" : "none",
+                          transition: "height 0.5s",
+                        }} />
+                      </div>
+                      <div style={{ fontSize: 10, color: d.isToday ? "#1e3a5f" : "#94a3b8", marginTop: 4, fontWeight: d.isToday ? "800" : "600" }}>{d.label}</div>
+                    </div>
+                  ));
+                })()}
+              </div>
+              <div style={{ display: "flex", gap: 12, marginTop: 8, justifyContent: "center" }}>
+                {[["#3b82f6","حاضر"],["#fde68a","متأخر"],["#fee2e2","غائب"]].map(([c,l]) => (
+                  <div key={l} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#64748b" }}>
+                    <div style={{ width: 10, height: 10, borderRadius: 2, background: c }} />{l}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════
+//  PHASE 3 — TAB: MANUAL ATTENDANCE (ADMIN)
+// ══════════════════════════════════════════════
+function TabManualAttendance({ employees, records, setRecords, settings, shifts, toast }) {
+  const [selEmp, setSelEmp] = useState("");
+  const [selDate, setSelDate] = useState(getToday());
+  const [checkIn, setCheckIn] = useState("");
+  const [checkOut, setCheckOut] = useState("");
+  const [notes, setNotes] = useState("");
+  const [editModal, setEditModal] = useState(null);
+  const [delConfirm, setDelConfirm] = useState(null);
+  const [filterEmp, setFilterEmp] = useState("all");
+  const [filterDate, setFilterDate] = useState("");
+
+  const getEmpShift = (emp) => {
+    if (!emp) return null;
+    return shifts?.find(s => s.id === emp.shiftId) || null;
+  };
+
+  const getShiftStart = (emp) => getEmpShift(emp)?.start || settings.workStart;
+  const getShiftTolerance = (emp) => {
+    const sh = getEmpShift(emp);
+    return sh ? Number(sh.tolerance) : Number(settings.lateTolerance);
+  };
+
+  function addRecord() {
+    if (!selEmp) { toast("اختر موظفاً أولاً", "error"); return; }
+    if (!selDate) { toast("اختر التاريخ", "error"); return; }
+    if (!checkIn) { toast("أدخل وقت الحضور على الأقل", "error"); return; }
+    const exists = records.find(r => r.employeeId === selEmp && r.date === selDate);
+    if (exists) { toast("يوجد سجل لهذا الموظف في هذا اليوم — استخدم التعديل", "error"); return; }
+    const emp = employees.find(e => e.id === selEmp);
+    const late = calcLateMinutes(checkIn, getShiftStart(emp), getShiftTolerance(emp));
+    const rec = {
+      id: generateId(), employeeId: selEmp, date: selDate,
+      checkIn, checkOut: checkOut || null,
+      status: late > 0 ? "متأخر" : "حاضر",
+      lateMinutes: late, notes: notes || "", addedByAdmin: true,
+    };
+    setRecords(p => [...p, rec]);
+    toast("✅ تم إضافة سجل الحضور يدوياً");
+    setCheckIn(""); setCheckOut(""); setNotes(""); setSelEmp(""); setSelDate(getToday());
+  }
+
+  // Edit modal
+  function EditModal({ rec, onClose }) {
+    const emp = employees.find(e => e.id === rec.employeeId);
+    const [form, setForm] = useState({ checkIn: rec.checkIn || "", checkOut: rec.checkOut || "", notes: rec.notes || "", status: rec.status });
+    const sf = (k, v) => setForm(p => ({ ...p, [k]: v }));
+
+    function save() {
+      if (!form.checkIn) { toast("وقت الحضور مطلوب", "error"); return; }
+      const late = calcLateMinutes(form.checkIn, getShiftStart(emp), getShiftTolerance(emp));
+      setRecords(p => p.map(r => r.id === rec.id ? {
+        ...r, checkIn: form.checkIn, checkOut: form.checkOut || null,
+        notes: form.notes, status: form.status,
+        lateMinutes: form.status === "متأخر" ? late : 0,
+        editedByAdmin: true,
+      } : r));
+      toast("✅ تم تعديل السجل");
+      onClose();
+    }
+
+    return (
+      <Modal title="✏️ تعديل سجل الحضور" onClose={onClose}>
+        <div style={{ background: "#f0f9ff", borderRadius: 8, padding: "10px 14px", marginBottom: 16, fontSize: 13 }}>
+          <strong>{emp?.name}</strong> — {rec.date} ({dayNameAr(rec.date)})
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+          <div>
+            <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>وقت الحضور *</label>
+            <input type="time" value={form.checkIn} onChange={e => sf("checkIn", e.target.value)}
+              style={{ width: "100%", padding: "9px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14 }} />
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>وقت الانصراف</label>
+            <input type="time" value={form.checkOut} onChange={e => sf("checkOut", e.target.value)}
+              style={{ width: "100%", padding: "9px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14 }} />
+          </div>
+        </div>
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>الحالة</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            {["حاضر", "متأخر", "غائب", "إجازة", "مأمورية"].map(s => (
+              <button key={s} onClick={() => sf("status", s)} style={{
+                padding: "7px 12px", border: "2px solid", borderRadius: 8, cursor: "pointer", fontSize: 12, fontWeight: "700", fontFamily: "Cairo, Arial",
+                borderColor: form.status === s ? "#1e3a5f" : "#e2e8f0",
+                background: form.status === s ? "#1e3a5f" : "white",
+                color: form.status === s ? "white" : "#374151",
+              }}>{s}</button>
+            ))}
+          </div>
+        </div>
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>ملاحظات</label>
+          <textarea value={form.notes} onChange={e => sf("notes", e.target.value)} rows={3} placeholder="أي ملاحظات..."
+            style={{ width: "100%", padding: "9px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial", resize: "vertical" }} />
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={save} style={{ flex: 1, padding: "11px", background: "#1e3a5f", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontFamily: "Cairo, Arial" }}>💾 حفظ التعديلات</button>
+          <button onClick={onClose} style={{ flex: 1, padding: "11px", background: "#f1f5f9", color: "#64748b", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontFamily: "Cairo, Arial" }}>إلغاء</button>
+        </div>
+      </Modal>
+    );
+  }
+
+  // Mark absent for a day
+  function markAbsent(empId, date, status) {
+    const exists = records.find(r => r.employeeId === empId && r.date === date);
+    if (exists) {
+      setRecords(p => p.map(r => r.id === exists.id ? { ...r, status, checkIn: null, checkOut: null, lateMinutes: 0, editedByAdmin: true } : r));
+    } else {
+      setRecords(p => [...p, { id: generateId(), employeeId: empId, date, checkIn: null, checkOut: null, status, lateMinutes: 0, notes: "", addedByAdmin: true }]);
+    }
+    toast(`✅ تم تسجيل "${status}" للموظف`);
+  }
+
+  const filteredRecs = records.filter(r => {
+    if (filterEmp !== "all" && r.employeeId !== filterEmp) return false;
+    if (filterDate && r.date !== filterDate) return false;
+    return true;
+  }).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 100);
+
+  const getEmpName = (id) => employees.find(e => e.id === id)?.name || "غير معروف";
+
+  const statusColors = {
+    "حاضر": { bg: "#f0fdf4", color: "#16a34a" },
+    "متأخر": { bg: "#fffbeb", color: "#d97706" },
+    "غائب": { bg: "#fef2f2", color: "#dc2626" },
+    "إجازة": { bg: "#f0f9ff", color: "#0891b2" },
+    "مأمورية": { bg: "#faf5ff", color: "#7c3aed" },
+  };
+
+  const selEmpObj = employees.find(e => e.id === selEmp);
+  const selEmpShift = selEmpObj ? getEmpShift(selEmpObj) : null;
+
+  return (
+    <div>
+      {editModal && <EditModal rec={editModal} onClose={() => setEditModal(null)} />}
+      {delConfirm && (
+        <Modal title="⚠️ تأكيد الحذف" onClose={() => setDelConfirm(null)}>
+          <p style={{ color: "#374151", marginTop: 0 }}>هل تريد حذف سجل حضور <strong>{getEmpName(delConfirm.employeeId)}</strong> بتاريخ <strong>{delConfirm.date}</strong>؟</p>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={() => { setRecords(p => p.filter(r => r.id !== delConfirm.id)); toast("🗑️ تم حذف السجل", "error"); setDelConfirm(null); }}
+              style={{ flex: 1, padding: "11px", background: "#ef4444", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontFamily: "Cairo, Arial" }}>نعم، احذف</button>
+            <button onClick={() => setDelConfirm(null)}
+              style={{ flex: 1, padding: "11px", background: "#f1f5f9", color: "#374151", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontFamily: "Cairo, Arial" }}>إلغاء</button>
+          </div>
+        </Modal>
+      )}
+
+      <h2 style={{ margin: "0 0 20px", color: "#1e3a5f", fontSize: 20, fontWeight: "800" }}>📝 تسجيل حضور يدوي</h2>
+
+      {/* ADD RECORD FORM */}
+      <div style={{ background: "white", borderRadius: 14, padding: 24, marginBottom: 20, boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+        <h3 style={{ margin: "0 0 18px", color: "#1e3a5f", fontSize: 16, fontWeight: "800" }}>➕ إضافة سجل حضور جديد</h3>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px,1fr))", gap: 14, marginBottom: 16 }}>
+          <div>
+            <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>الموظف *</label>
+            <select value={selEmp} onChange={e => setSelEmp(e.target.value)}
+              style={{ width: "100%", padding: "10px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial" }}>
+              <option value="">— اختر موظفاً —</option>
+              {employees.map(e => {
+                const sh = shifts?.find(s => s.id === e.shiftId);
+                return <option key={e.id} value={e.id}>{e.name}{sh ? ` (${sh.name})` : ""}</option>;
+              })}
+            </select>
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>التاريخ *</label>
+            <input type="date" value={selDate} onChange={e => setSelDate(e.target.value)}
+              style={{ width: "100%", padding: "10px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14 }} />
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>وقت الحضور *</label>
+            <input type="time" value={checkIn} onChange={e => setCheckIn(e.target.value)}
+              style={{ width: "100%", padding: "10px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14 }} />
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>وقت الانصراف</label>
+            <input type="time" value={checkOut} onChange={e => setCheckOut(e.target.value)}
+              style={{ width: "100%", padding: "10px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14 }} />
+          </div>
+        </div>
+
+        {/* Shift info preview */}
+        {selEmpObj && (
+          <div style={{ background: selEmpShift ? `${selEmpShift.color}10` : "#f0f9ff", border: `1px solid ${selEmpShift ? selEmpShift.color + "30" : "#bae6fd"}`, borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 13 }}>
+            <div style={{ display: "flex", gap: 16, flexWrap: "wrap", color: "#374151" }}>
+              <span>👤 <strong>{selEmpObj.name}</strong></span>
+              {selEmpShift && <span style={{ color: selEmpShift.color, fontWeight: "700" }}>🕐 {selEmpShift.name}: {selEmpShift.start} – {selEmpShift.end}</span>}
+              <span>⏱️ سماح: {getShiftTolerance(selEmpObj)} دقيقة</span>
+              {checkIn && <span style={{ color: calcLateMinutes(checkIn, getShiftStart(selEmpObj), getShiftTolerance(selEmpObj)) > 0 ? "#dc2626" : "#16a34a", fontWeight: "700" }}>
+                {calcLateMinutes(checkIn, getShiftStart(selEmpObj), getShiftTolerance(selEmpObj)) > 0
+                  ? `⚠️ متأخر ${calcLateMinutes(checkIn, getShiftStart(selEmpObj), getShiftTolerance(selEmpObj))} دقيقة`
+                  : "✅ في الوقت"}
+              </span>}
+            </div>
+          </div>
+        )}
+
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>ملاحظات (اختياري)</label>
+          <input value={notes} onChange={e => setNotes(e.target.value)} placeholder="مثال: نسي يسجل — تم التحقق يدوياً"
+            style={{ width: "100%", padding: "10px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial" }} />
+        </div>
+
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <button onClick={addRecord} style={{ padding: "11px 24px", background: "#1e3a5f", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 14, fontFamily: "Cairo, Arial" }}>
+            ✅ إضافة سجل الحضور
+          </button>
+          {selEmp && selDate && (
+            <>
+              <button onClick={() => markAbsent(selEmp, selDate, "غائب")} style={{ padding: "11px 16px", background: "#fef2f2", color: "#dc2626", border: "2px solid #fca5a5", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 14, fontFamily: "Cairo, Arial" }}>
+                ❌ تسجيل غياب
+              </button>
+              <button onClick={() => markAbsent(selEmp, selDate, "إجازة")} style={{ padding: "11px 16px", background: "#f0f9ff", color: "#0891b2", border: "2px solid #bae6fd", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 14, fontFamily: "Cairo, Arial" }}>
+                🏖️ تسجيل إجازة
+              </button>
+              <button onClick={() => markAbsent(selEmp, selDate, "مأمورية")} style={{ padding: "11px 16px", background: "#faf5ff", color: "#7c3aed", border: "2px solid #ddd6fe", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 14, fontFamily: "Cairo, Arial" }}>
+                🚗 تسجيل مأمورية
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* BULK ABSENCE SECTION */}
+      <div style={{ background: "white", borderRadius: 14, padding: 20, marginBottom: 20, boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+        <h3 style={{ margin: "0 0 14px", color: "#1e3a5f", fontSize: 15, fontWeight: "800" }}>📋 تسجيل غياب جماعي لتاريخ محدد</h3>
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <div>
+            <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>التاريخ</label>
+            <input type="date" value={selDate} onChange={e => setSelDate(e.target.value)}
+              style={{ padding: "9px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14 }} />
+          </div>
+          <div style={{ alignSelf: "flex-end" }}>
+            <button onClick={() => {
+              const absent = employees.filter(e => !records.find(r => r.employeeId === e.id && r.date === selDate));
+              if (absent.length === 0) { toast("كل الموظفين لديهم سجلات في هذا اليوم", "error"); return; }
+              if (!window.confirm(`سيتم تسجيل غياب لـ ${absent.length} موظف في ${selDate}. تأكيد؟`)) return;
+              const newRecs = absent.map(e => ({ id: generateId(), employeeId: e.id, date: selDate, checkIn: null, checkOut: null, status: "غائب", lateMinutes: 0, notes: "تسجيل غياب تلقائي", addedByAdmin: true }));
+              setRecords(p => [...p, ...newRecs]);
+              toast(`✅ تم تسجيل غياب ${absent.length} موظف`);
+            }} style={{ padding: "10px 18px", background: "#dc2626", color: "white", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 14, fontFamily: "Cairo, Arial" }}>
+              ❌ تسجيل غياب للغائبين ({employees.filter(e => !records.find(r => r.employeeId === e.id && r.date === selDate)).length} موظف)
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* RECORDS TABLE WITH EDIT/DELETE */}
+      <div style={{ background: "white", borderRadius: 14, overflow: "hidden", boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
+        <div style={{ padding: "16px 20px", borderBottom: "1px solid #f1f5f9", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+          <h3 style={{ margin: 0, color: "#1e3a5f", fontSize: 15, fontWeight: "800" }}>🗂️ كل السجلات — تعديل وحذف</h3>
+          <div style={{ display: "flex", gap: 8 }}>
+            <select value={filterEmp} onChange={e => setFilterEmp(e.target.value)}
+              style={{ padding: "7px 10px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 13, fontFamily: "Cairo, Arial" }}>
+              <option value="all">كل الموظفين</option>
+              {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+            </select>
+            <input type="date" value={filterDate} onChange={e => setFilterDate(e.target.value)}
+              style={{ padding: "7px 10px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 13 }} />
+            <button onClick={() => { setFilterEmp("all"); setFilterDate(""); }}
+              style={{ padding: "7px 12px", background: "#f1f5f9", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: "Cairo, Arial", color: "#64748b", fontWeight: "700" }}>
+              🔄 مسح
+            </button>
+          </div>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Cairo, Arial" }}>
+            <thead>
+              <tr style={{ background: "#1e3a5f", color: "white" }}>
+                {["الموظف", "التاريخ", "اليوم", "الحضور", "الانصراف", "ساعات العمل", "التأخير", "الحالة", "ملاحظات", "إجراءات"].map(h => (
+                  <th key={h} style={{ padding: "11px 12px", textAlign: "right", fontSize: 12, fontWeight: "700", whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filteredRecs.length === 0 ? (
+                <tr><td colSpan={10} style={{ textAlign: "center", padding: 32, color: "#94a3b8" }}>لا توجد سجلات</td></tr>
+              ) : filteredRecs.map((r, i) => {
+                const sc = statusColors[r.status] || { bg: "#f1f5f9", color: "#64748b" };
+                return (
+                  <tr key={r.id} style={{ background: i % 2 === 0 ? "#f8fafc" : "white" }}>
+                    <td style={{ padding: "10px 12px", fontWeight: "700", color: "#1e293b", fontSize: 13 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        {r.addedByAdmin && <span title="أضافه المدير" style={{ fontSize: 10, background: "#dbeafe", color: "#2563a8", padding: "1px 5px", borderRadius: 4, fontWeight: "700" }}>يدوي</span>}
+                        {r.editedByAdmin && <span title="عدّله المدير" style={{ fontSize: 10, background: "#fef9c3", color: "#854d0e", padding: "1px 5px", borderRadius: 4, fontWeight: "700" }}>معدّل</span>}
+                        {getEmpName(r.employeeId)}
+                      </div>
+                    </td>
+                    <td style={{ padding: "10px 12px", fontSize: 12, color: "#475569" }}>{r.date}</td>
+                    <td style={{ padding: "10px 12px", fontSize: 12, color: "#475569" }}>{dayNameAr(r.date)}</td>
+                    <td style={{ padding: "10px 12px", fontWeight: "700", color: "#059669", fontSize: 13 }}>{r.checkIn || "—"}</td>
+                    <td style={{ padding: "10px 12px", fontWeight: "700", color: "#dc2626", fontSize: 13 }}>{r.checkOut || "—"}</td>
+                    <td style={{ padding: "10px 12px", fontWeight: "700", color: "#2563a8", fontSize: 12 }}>{calcWorkHours(r.checkIn, r.checkOut)}</td>
+                    <td style={{ padding: "10px 12px", fontSize: 12, color: r.lateMinutes > 0 ? "#d97706" : "#94a3b8", fontWeight: "700" }}>
+                      {r.lateMinutes > 0 ? `${r.lateMinutes}د` : "—"}
+                    </td>
+                    <td style={{ padding: "10px 12px" }}>
+                      <span style={{ background: sc.bg, color: sc.color, padding: "2px 8px", borderRadius: 20, fontSize: 11, fontWeight: "700" }}>{r.status}</span>
+                    </td>
+                    <td style={{ padding: "10px 12px", fontSize: 11, color: "#64748b", maxWidth: 120 }}>
+                      {r.notes ? <span title={r.notes} style={{ cursor: "help" }}>📝 {r.notes.slice(0, 20)}{r.notes.length > 20 ? "..." : ""}</span> : "—"}
+                    </td>
+                    <td style={{ padding: "10px 12px" }}>
+                      <div style={{ display: "flex", gap: 4 }}>
+                        <button onClick={() => setEditModal(r)} style={{ padding: "5px 8px", background: "#eff6ff", color: "#2563a8", border: "none", borderRadius: 5, cursor: "pointer", fontSize: 11, fontWeight: "700", fontFamily: "Cairo, Arial" }}>✏️</button>
+                        <button onClick={() => setDelConfirm(r)} style={{ padding: "5px 8px", background: "#fef2f2", color: "#dc2626", border: "none", borderRadius: 5, cursor: "pointer", fontSize: 11, fontWeight: "700", fontFamily: "Cairo, Arial" }}>🗑️</button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        {filteredRecs.length > 0 && (
+          <div style={{ padding: "10px 16px", background: "#f8fafc", borderTop: "1px solid #f1f5f9", fontSize: 12, color: "#94a3b8" }}>
+            يعرض {filteredRecs.length} سجل (آخر 100)
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════
+//  ROOT APP
+// ══════════════════════════════════════════════
+function App() {
+  const db = useDB();
+  const [user, setUser] = useState(null);
+  const [fbReady, setFbReady] = useState(!!window.__fsdb);
+
+  useEffect(() => {
+    setFbReady(true);
+  }, []);
+
+  useEffect(() => {
+    // بيانات افتراضية لو الـ localStorage فاضي
+    const hasEmps = localStorage.getItem(KEYS.employees);
+    const hasRecs = localStorage.getItem(KEYS.records);
+    if (!hasEmps) localStorage.setItem(KEYS.employees, JSON.stringify(DEFAULT_EMPLOYEES));
+    if (!hasRecs) localStorage.setItem(KEYS.records, JSON.stringify(DEFAULT_RECORDS));
+    if (!localStorage.getItem(KEYS.settings)) localStorage.setItem(KEYS.settings, JSON.stringify(DEFAULT_SETTINGS));
+    if (!localStorage.getItem(KEYS.shifts)) localStorage.setItem(KEYS.shifts, JSON.stringify(DEFAULT_SHIFTS));
+
+    // لو أول مرة ارفع الـ defaults لـ Firestore
+    if (!hasEmps) {
+      const uploadDefaults = () => {
+        const db = window.__fsdb;
+        if (!db) { setTimeout(uploadDefaults, 300); return; }
+        db.collection("employees").get().then(snap => {
+          if (!snap.empty) return;
+          const batch = db.batch();
+          DEFAULT_EMPLOYEES.forEach(e => batch.set(db.collection("employees").doc(e.id), e));
+          DEFAULT_RECORDS.forEach(r => batch.set(db.collection("records").doc(r.id), r));
+          DEFAULT_SHIFTS.forEach(s => batch.set(db.collection("shifts").doc(s.id), s));
+          batch.set(db.collection("settings").doc("main"), DEFAULT_SETTINGS);
+          batch.commit().catch(()=>{});
+        }).catch(()=>{});
+      };
+      setTimeout(uploadDefaults, 500);
+    }
+  }, []);
+
+  return (
+    <>
+      <SyncIndicator synced={db.synced} online={db.online} />
+      {!user && <LoginScreen onLogin={setUser} settings={db.settings} />}
+      {user && user.role === "admin" && <AdminDashboard user={user} onLogout={() => setUser(null)} db={db} />}
+      {user && user.role === "employee" && <EmployeeDashboard user={user} onLogout={() => setUser(null)} db={db} />}
+    </>
+  );
+}
+
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(App));
+  </script>
+</body>
+</html>
