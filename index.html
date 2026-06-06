@@ -1069,8 +1069,8 @@ function TabBranches({ branches, setBranches, employees, setEmployees, toast }) 
 }
 
 
-function LoginScreen({ onLogin, settings, employees: empFromDB, branches, deviceBranchId }) {
-  const [role, setRole] = useState("employee");
+function LoginScreen({ onLogin, settings, employees: empFromDB, branches, deviceBranchId, adminOnly }) {
+  const [role, setRole] = useState(adminOnly ? "admin" : "employee");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -1156,6 +1156,7 @@ function LoginScreen({ onLogin, settings, employees: empFromDB, branches, device
           </div>
 
           {/* Role Toggle */}
+          {!adminOnly && (
           <div style={{ display: "flex", background: "#f1f5f9", borderRadius: 14, padding: 4, marginBottom: 24, gap: 4 }}>
             {[{ val: "employee", label: "👤 موظف" }, { val: "admin", label: "👑 مدير" }].map(r => (
               <button key={r.val} onClick={() => { setRole(r.val); setError(""); setUsername(""); setPassword(""); }}
@@ -1168,6 +1169,15 @@ function LoginScreen({ onLogin, settings, employees: empFromDB, branches, device
                 }}>{r.label}</button>
             ))}
           </div>
+          )}
+          {adminOnly && (
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 24 }}>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "#1e3a5f", borderRadius: 12, padding: "10px 24px" }}>
+              <span style={{ fontSize: 18 }}>👑</span>
+              <span style={{ color: "white", fontWeight: "800", fontSize: 15 }}>دخول المدير</span>
+            </div>
+          </div>
+          )}
 
           {/* Fields */}
           {[
@@ -4047,7 +4057,7 @@ function App() {
   function renderGate() {
     // bypass المدير
     if (adminBypass) {
-      return <LoginScreen onLogin={handleLogin} settings={db.settings} employees={visibleEmployees} branches={branches} deviceBranchId={approvedBranchId} />;
+      return <LoginScreen onLogin={handleLogin} settings={db.settings} employees={visibleEmployees} branches={branches} deviceBranchId={approvedBranchId} adminOnly={true} />;
     }
     // مفيش فروع بعد → شاشة عادية
     if (noBranches) {
