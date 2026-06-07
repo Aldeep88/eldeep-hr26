@@ -17,9 +17,9 @@
   <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
   <style>
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap');
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Cairo', Arial, sans-serif; direction: rtl; }
-    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap');
   </style>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
@@ -308,7 +308,10 @@ const calcLateMinutes = (checkIn, workStart, tolerance) => {
   if (!checkIn) return 0;
   const [ih, im] = checkIn.split(":").map(Number);
   const [wh, wm] = workStart.split(":").map(Number);
-  const diff = (ih * 60 + im) - (wh * 60 + wm);
+  let diff = (ih * 60 + im) - (wh * 60 + wm);
+  // لو الشيفت بيبدأ بالليل (مثلاً 22:00) والحضور بعد منتصف الليل (مثلاً 01:00)
+  // الفارق هيبقى سالب جداً — نضيف 24 ساعة
+  if (diff < -12 * 60) diff += 24 * 60;
   return diff > tolerance ? diff : 0;
 };
 
@@ -1956,7 +1959,10 @@ function TabMonthlyReport({ employees, records, settings, toast, shifts, branche
       if (!r.checkIn || !r.checkOut) return a;
       const [ih, im] = r.checkIn.split(":").map(Number);
       const [oh, om] = r.checkOut.split(":").map(Number);
-      return a + (oh * 60 + om) - (ih * 60 + im);
+      let diff = (oh * 60 + om) - (ih * 60 + im);
+      if (diff <= 0) diff += 24 * 60; // شيفت يعدي منتصف الليل
+      if (diff > 24 * 60) return a;   // بيانات غلط — نتجاهلها
+      return a + diff;
     }, 0);
     const attendanceRate = rows.length > 0 ? Math.round((present / rows.length) * 100) : 0;
     setReport({
