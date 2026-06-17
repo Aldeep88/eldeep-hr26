@@ -8,9 +8,9 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>نظام الحضور والانصراف</title>
-  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.23.9/babel.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <!-- Firebase SDK via compat -->
   <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
@@ -23,8 +23,78 @@
   </style>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    #loading-screen {
+      position: fixed; inset: 0;
+      background: linear-gradient(135deg, #0a1628, #1e3a5f);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      font-family: 'Cairo', Arial, sans-serif;
+      color: white; z-index: 9999;
+      transition: opacity 0.5s ease;
+    }
+    #loading-screen.hidden { opacity: 0; pointer-events: none; }
+    .loading-spinner {
+      width: 56px; height: 56px;
+      border: 5px solid rgba(255,255,255,0.2);
+      border-top-color: #60a5fa;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-bottom: 20px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #error-screen {
+      display: none; position: fixed; inset: 0;
+      background: linear-gradient(135deg, #0a1628, #1e3a5f);
+      align-items: center; justify-content: center;
+      font-family: 'Cairo', Arial, sans-serif;
+      color: white; z-index: 9999; text-align: center; padding: 20px;
+    }
+    #error-screen.visible { display: flex; flex-direction: column; }
+  </style>
 </head>
 <body>
+  <!-- شاشة التحميل -->
+  <div id="loading-screen">
+    <div class="loading-spinner"></div>
+    <div style="font-size:20px;font-weight:700;margin-bottom:8px;">نظام الحضور والانصراف</div>
+    <div style="font-size:14px;color:rgba(255,255,255,0.7);" id="loading-msg">جاري تحميل النظام...</div>
+  </div>
+  <!-- شاشة الخطأ -->
+  <div id="error-screen">
+    <div style="font-size:48px;margin-bottom:16px;">⚠️</div>
+    <div style="font-size:20px;font-weight:700;margin-bottom:8px;">تعذّر تحميل النظام</div>
+    <div style="font-size:14px;color:rgba(255,255,255,0.7);max-width:400px;line-height:1.8;margin-bottom:24px;" id="error-msg">
+      تأكد من اتصالك بالإنترنت ثم أعد تحميل الصفحة.
+    </div>
+    <button onclick="location.reload()" style="padding:12px 32px;background:#2563a8;color:white;border:none;border-radius:10px;font-family:Cairo,Arial;font-size:16px;font-weight:700;cursor:pointer;">🔄 إعادة المحاولة</button>
+  </div>
+
+  <script>
+    // مراقبة تحميل المكتبات الخارجية
+    var _loadTimeout = setTimeout(function() {
+      if (!window.__appStarted) {
+        document.getElementById('loading-screen').classList.add('hidden');
+        var errScreen = document.getElementById('error-screen');
+        errScreen.classList.add('visible');
+        document.getElementById('error-msg').innerHTML =
+          'انتهت مهلة التحميل. تأكد من اتصالك بالإنترنت وأعد المحاولة.<br><small style="color:rgba(255,255,255,0.5)">قد تكون إحدى المكتبات الخارجية غير متاحة.</small>';
+      }
+    }, 20000);
+
+    window.onerror = function(msg, src, line) {
+      console.error('JS Error:', msg, src, line);
+      if (!window.__appStarted) {
+        clearTimeout(_loadTimeout);
+        document.getElementById('loading-screen').classList.add('hidden');
+        var errScreen = document.getElementById('error-screen');
+        errScreen.classList.add('visible');
+        document.getElementById('error-msg').innerHTML =
+          'حدث خطأ في التحميل.<br><small style="color:rgba(255,255,255,0.5)">' + msg + '</small>';
+      }
+    };
+  </script>
+
   <div id="root"></div>
   <script type="text/babel">
     const { useState, useEffect, useCallback } = React;
@@ -4111,52 +4181,10 @@ function App() {
 }
 
 
-    // Error Boundary
-    class ErrorBoundary extends React.Component {
-      constructor(props) { super(props); this.state = { error: null }; }
-      static getDerivedStateFromError(e) { return { error: e }; }
-      render() {
-        if (this.state.error) {
-          return React.createElement('div', {
-            style: { padding: 32, fontFamily: 'Cairo, Arial', direction: 'rtl', background: '#fef2f2', minHeight: '100vh', color: '#dc2626' }
-          },
-            React.createElement('h2', null, '❌ خطأ في التطبيق'),
-            React.createElement('pre', { style: { background: '#fff', padding: 16, borderRadius: 8, fontSize: 13, whiteSpace: 'pre-wrap', color: '#1e293b' } },
-              this.state.error.toString() + '\n\n' + (this.state.error.stack || '')
-            )
-          );
-        }
-        return this.props.children;
-      }
-    }
-
-    // Global error catcher
-    window.addEventListener('error', function(e) {
-      document.getElementById('root').innerHTML =
-        '<div style="padding:32px;font-family:Cairo,Arial;direction:rtl;background:#fef2f2;min-height:100vh;color:#dc2626">' +
-        '<h2>❌ خطأ JavaScript</h2>' +
-        '<pre style="background:#fff;padding:16px;border-radius:8px;font-size:13px;white-space:pre-wrap;color:#1e293b">' +
-        (e.message || '') + '\n\nملف: ' + (e.filename || '') + '\nسطر: ' + (e.lineno || '') +
-        '\n\n' + (e.error && e.error.stack ? e.error.stack : '') +
-        '</pre></div>';
-    });
-
-    window.addEventListener('unhandledrejection', function(e) {
-      const msg = e.reason ? (e.reason.message || String(e.reason)) : 'Unknown promise rejection';
-      const div = document.createElement('div');
-      div.innerHTML = '<div style="position:fixed;bottom:60px;left:16px;right:16px;background:#fef2f2;border:2px solid #dc2626;border-radius:12px;padding:16px;font-family:Cairo,Arial;direction:rtl;z-index:99999;font-size:13px;color:#dc2626"><b>⚠️ خطأ غير معالج:</b><br>' + msg + '</div>';
-      document.body.appendChild(div.firstChild);
-    });
-
-    try {
-      const root = ReactDOM.createRoot(document.getElementById('root'));
-      root.render(React.createElement(ErrorBoundary, null, React.createElement(App)));
-    } catch(e) {
-      document.getElementById('root').innerHTML =
-        '<div style="padding:32px;font-family:Cairo,Arial;direction:rtl;background:#fef2f2;min-height:100vh;color:#dc2626">' +
-        '<h2>❌ فشل تشغيل React</h2>' +
-        '<pre style="background:#fff;padding:16px;border-radius:8px;font-size:13px;white-space:pre-wrap">' + e.toString() + '</pre></div>';
-    }
+    window.__appStarted = true;
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(App));
+    setTimeout(function() { var ls = document.getElementById('loading-screen'); if (ls) ls.classList.add('hidden'); }, 1200);
   </script>
 </body>
 </html>
