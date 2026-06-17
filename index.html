@@ -17,9 +17,9 @@
   <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap');
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Cairo', Arial, sans-serif; direction: rtl; }
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap');
   </style>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
@@ -308,10 +308,7 @@ const calcLateMinutes = (checkIn, workStart, tolerance) => {
   if (!checkIn) return 0;
   const [ih, im] = checkIn.split(":").map(Number);
   const [wh, wm] = workStart.split(":").map(Number);
-  let diff = (ih * 60 + im) - (wh * 60 + wm);
-  // لو الشيفت بيبدأ بالليل (مثلاً 22:00) والحضور بعد منتصف الليل (مثلاً 01:00)
-  // الفارق هيبقى سالب جداً — نضيف 24 ساعة
-  if (diff < -12 * 60) diff += 24 * 60;
+  const diff = (ih * 60 + im) - (wh * 60 + wm);
   return diff > tolerance ? diff : 0;
 };
 
@@ -336,83 +333,12 @@ const dayNameAr = (dateStr) => {
 //  FIREBASE HOOK (Real-time sync + Offline)
 // ══════════════════════════════════════════════
 const KEYS = {
-  employees:   "att_employees",
-  records:     "att_records",
-  settings:    "att_settings",
-  shifts:      "att_shifts",
-  messages:    "att_messages",
-  branches:    "att_branches",
-  deviceId:    "att_device_id",    // معرّف فريد للجهاز (مش بيتغير)
+  employees: "att_employees",
+  records: "att_records",
+  settings: "att_settings",
+  shifts: "att_shifts",
+  messages: "att_messages",
 };
-
-// ══════════════════════════════════════════════
-//  DEVICE ID — معرّف ثابت للجهاز في localStorage
-// ══════════════════════════════════════════════
-function getOrCreateDeviceId() {
-  let id = localStorage.getItem(KEYS.deviceId);
-  if (!id) {
-    id = "dev_" + Math.random().toString(36).slice(2, 10) + "_" + Date.now().toString(36);
-    localStorage.setItem(KEYS.deviceId, id);
-  }
-  return id;
-}
-
-// ══════════════════════════════════════════════
-//  DEVICE AUTH HOOK
-//  يتحكم في: هل الجهاز ده معتمد؟ وعلى أي فرع؟
-// ══════════════════════════════════════════════
-function useDeviceAuth() {
-  const deviceId = getOrCreateDeviceId();
-  // status: "checking" | "pending" | "approved" | "rejected" | "unknown"
-  const [status, setStatus]     = useState("checking");
-  const [approvedBranchId, setApprovedBranchId] = useState(null);
-  const [deviceName, setDeviceName]   = useState(() => localStorage.getItem("att_device_name") || "");
-
-  useEffect(() => {
-    let unsub = null;
-    function attach() {
-      const db = window.__fsdb;
-      if (!db) { setTimeout(attach, 300); return; }
-      // استمع على وثيقة الجهاز ده في collection "devices"
-      unsub = db.collection("devices").doc(deviceId).onSnapshot(snap => {
-        if (!snap.exists) {
-          setStatus("unknown"); // جهاز جديد — لسه مش مسجّل
-          return;
-        }
-        const data = snap.data();
-        if (data.status === "approved") {
-          setApprovedBranchId(data.branchId);
-          setStatus("approved");
-        } else if (data.status === "rejected") {
-          setStatus("rejected");
-        } else {
-          setStatus("pending");
-        }
-      }, () => setStatus("unknown"));
-    }
-    attach();
-    return () => unsub && unsub();
-  }, [deviceId]);
-
-  // إرسال طلب اعتماد للمدير
-  function requestApproval(name, branchId) {
-    const db = window.__fsdb;
-    if (!db) return;
-    localStorage.setItem("att_device_name", name);
-    setDeviceName(name);
-    db.collection("devices").doc(deviceId).set({
-      deviceId,
-      name,
-      branchId: branchId || null,
-      status:   "pending",
-      requestedAt: new Date().toISOString(),
-      userAgent: navigator.userAgent.slice(0, 100),
-    });
-    setStatus("pending");
-  }
-
-  return { deviceId, status, approvedBranchId, deviceName, requestApproval };
-}
 
 // مؤشر حالة الاتصال
 function SyncIndicator({ synced, online }) {
@@ -483,10 +409,6 @@ function useDB() {
   const [messages, setMessagesState] = useState(() => {
     try { const s = localStorage.getItem(KEYS.messages); return s ? JSON.parse(s) : []; } catch { return []; }
   });
-  const [branches, setBranchesState] = useState(() => {
-    try { const s = localStorage.getItem(KEYS.branches); return s ? JSON.parse(s) : []; } catch { return []; }
-  });
-  const [devices, setDevicesState] = useState([]);
   const [synced, setSynced] = useState(false);
   const [online, setOnline] = useState(navigator.onLine);
 
@@ -556,19 +478,6 @@ function useDB() {
         const data = snap.docs.map(d => d.data());
         setMessagesState(data);
         localStorage.setItem(KEYS.messages, JSON.stringify(data));
-      }, () => {}));
-
-      unsubs.push(db.collection("branches").onSnapshot(snapOpts, snap => {
-        if (snap.metadata.fromCache) return;
-        const data = snap.docs.map(d => d.data());
-        setBranchesState(data);
-        localStorage.setItem(KEYS.branches, JSON.stringify(data));
-      }, () => {}));
-
-      // devices — real-time للأدمن يشوف الطلبات فوراً
-      unsubs.push(db.collection("devices").onSnapshot(snapOpts, snap => {
-        if (snap.metadata.fromCache) return;
-        setDevicesState(snap.docs.map(d => d.data()));
       }, () => {}));
     }
 
@@ -656,36 +565,7 @@ function useDB() {
     });
   }, [messages]);
 
-  const setBranches = useCallback((val) => {
-    const next = typeof val === "function" ? val(branches) : val;
-    setBranchesState(next);
-    localStorage.setItem(KEYS.branches, JSON.stringify(next));
-    const db = window.__fsdb;
-    if (!db) return;
-    branches.forEach(b => { if (!next.find(n => n.id === b.id)) fsDel("branches", b.id); });
-    next.forEach(b => {
-      const old = branches.find(o => o.id === b.id);
-      if (!old || JSON.stringify(old) !== JSON.stringify(b)) fsSet("branches", b.id, b);
-    });
-  }, [branches]);
-
-  // approve / reject جهاز مباشرة في Firestore
-  const approveDevice = useCallback((deviceId, branchId) => {
-    const db = window.__fsdb; if (!db) return;
-    db.collection("devices").doc(deviceId).update({ status: "approved", branchId, approvedAt: new Date().toISOString() });
-  }, []);
-
-  const rejectDevice = useCallback((deviceId) => {
-    const db = window.__fsdb; if (!db) return;
-    db.collection("devices").doc(deviceId).update({ status: "rejected", rejectedAt: new Date().toISOString() });
-  }, []);
-
-  const deleteDevice = useCallback((deviceId) => {
-    const db = window.__fsdb; if (!db) return;
-    db.collection("devices").doc(deviceId).delete();
-  }, []);
-
-  return { employees, setEmployees, records, setRecords, settings, setSettings, shifts, setShifts, messages, setMessages, branches, setBranches, devices, approveDevice, rejectDevice, deleteDevice, synced, online };
+  return { employees, setEmployees, records, setRecords, settings, setSettings, shifts, setShifts, messages, setMessages, synced, online };
 }
 
 // ══════════════════════════════════════════════
@@ -734,356 +614,15 @@ function Modal({ title, onClose, children }) {
 }
 
 // ══════════════════════════════════════════════
-//  DEVICE REQUEST SCREEN
-//  تظهر لأي جهاز جديد غير معتمد
+//  LOGIN SCREEN
 // ══════════════════════════════════════════════
-function DeviceRequestScreen({ branches, status, deviceName, onRequest, onAdminBypass }) {
-  const [name, setName]       = useState(deviceName || "");
-  const [branchId, setBranchId] = useState(branches[0]?.id || "");
-  const [submitted, setSubmitted] = useState(status === "pending");
-  const [time, setTime] = useState(new Date());
-
-  useEffect(() => {
-    const t = setInterval(() => setTime(new Date()), 1000);
-    return () => clearInterval(t);
-  }, []);
-
-  useEffect(() => {
-    if (status === "pending") setSubmitted(true);
-  }, [status]);
-
-  function handleRequest() {
-    if (!name.trim()) return;
-    if (!branchId) return;
-    onRequest(name.trim(), branchId);
-    setSubmitted(true);
-  }
-
-  const timeStr = time.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  const dateStr = time.toLocaleDateString("ar-EG", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
-
-  return (
-    <div style={{
-      minHeight: "100vh", direction: "rtl", fontFamily: "Cairo, Arial, sans-serif",
-      background: "linear-gradient(135deg,#0a1628 0%,#1e3a5f 45%,#0f4c8a 100%)",
-      display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
-    }}>
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap');
-        *{box-sizing:border-box} input:focus,select:focus{outline:none!important}
-        @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
-        @keyframes fadeUp{from{opacity:0;transform:translateY(30px)}to{opacity:1;transform:translateY(0)}}
-        @keyframes spin{to{transform:rotate(360deg)}}
-        @keyframes ripple{0%{opacity:0.4;transform:scale(1)}100%{opacity:0;transform:scale(2.5)}}`}
-      </style>
-
-      <div style={{ width: "100%", maxWidth: 440, animation: "fadeUp 0.5s ease" }}>
-        {/* الساعة */}
-        <div style={{ textAlign: "center", marginBottom: 24 }}>
-          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", marginBottom: 2 }}>{dateStr}</div>
-          <div style={{ fontSize: 36, fontWeight: "800", color: "white", letterSpacing: 2 }}>{timeStr}</div>
-        </div>
-
-        <div style={{ background: "white", borderRadius: 24, padding: "32px 28px", boxShadow: "0 30px 80px rgba(0,0,0,0.5)" }}>
-          {!submitted ? (
-            /* ── فورم الطلب ── */
-            <>
-              <div style={{ textAlign: "center", marginBottom: 24 }}>
-                <div style={{ fontSize: 44, marginBottom: 8, animation: "float 3s ease-in-out infinite" }}>📱</div>
-                <h2 style={{ margin: 0, fontSize: 19, fontWeight: "800", color: "#1e3a5f" }}>طلب اعتماد الجهاز</h2>
-                <p style={{ margin: "6px 0 0", fontSize: 13, color: "#94a3b8" }}>هذا الجهاز غير معتمد — أرسل طلباً للمدير</p>
-              </div>
-
-              <div style={{ marginBottom: 14 }}>
-                <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>اسم الجهاز</label>
-                <input
-                  value={name}
-                  onChange={e => setName(e.target.value)}
-                  placeholder="مثال: كمبيوتر الاستقبال، تابلت الفرع..."
-                  style={{ width: "100%", padding: "11px 14px", border: "2px solid #e2e8f0", borderRadius: 10, fontSize: 14, fontFamily: "Cairo, Arial" }}
-                  onFocus={e => e.target.style.borderColor = "#2563a8"}
-                  onBlur={e => e.target.style.borderColor = "#e2e8f0"}
-                />
-              </div>
-
-              <div style={{ marginBottom: 20 }}>
-                <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>الفرع</label>
-                {branches.length === 0 ? (
-                  <div style={{ padding: "11px 14px", border: "2px solid #fca5a5", borderRadius: 10, fontSize: 13, color: "#dc2626", background: "#fef2f2" }}>
-                    ⚠️ لا توجد فروع — تواصل مع المدير لإضافة الفروع أولاً
-                  </div>
-                ) : (
-                  <select value={branchId} onChange={e => setBranchId(e.target.value)}
-                    style={{ width: "100%", padding: "11px 14px", border: "2px solid #e2e8f0", borderRadius: 10, fontSize: 14, fontFamily: "Cairo, Arial", background: "white" }}
-                    onFocus={e => e.target.style.borderColor = "#2563a8"}
-                    onBlur={e => e.target.style.borderColor = "#e2e8f0"}>
-                    {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-                  </select>
-                )}
-              </div>
-
-              <button onClick={handleRequest} disabled={!name.trim() || !branchId || branches.length === 0}
-                style={{
-                  width: "100%", padding: "13px", background: (!name.trim() || !branchId || branches.length === 0) ? "#e2e8f0" : "linear-gradient(135deg,#1e3a5f,#2563a8)",
-                  color: (!name.trim() || !branchId || branches.length === 0) ? "#94a3b8" : "white",
-                  border: "none", borderRadius: 12, fontSize: 16, fontWeight: "800",
-                  cursor: (!name.trim() || !branchId || branches.length === 0) ? "not-allowed" : "pointer",
-                  fontFamily: "Cairo, Arial", marginBottom: 12,
-                }}>
-                📤 إرسال طلب الاعتماد
-              </button>
-
-              <button onClick={onAdminBypass} style={{
-                width: "100%", padding: "10px", background: "transparent",
-                color: "#94a3b8", border: "1px solid #e2e8f0", borderRadius: 12,
-                fontSize: 13, fontWeight: "700", cursor: "pointer", fontFamily: "Cairo, Arial",
-              }}>👑 دخول كمدير</button>
-            </>
-          ) : (
-            /* ── انتظار الموافقة ── */
-            <>
-              <div style={{ textAlign: "center", marginBottom: 20 }}>
-                <div style={{ position: "relative", width: 80, height: 80, margin: "0 auto 16px" }}>
-                  <div style={{ position: "absolute", inset: 0, borderRadius: "50%", background: "#eff6ff", animation: "ripple 2s ease-out infinite" }} />
-                  <div style={{ position: "absolute", inset: 0, borderRadius: "50%", background: "#dbeafe", animation: "ripple 2s ease-out infinite", animationDelay: "0.5s" }} />
-                  <div style={{ position: "relative", width: 80, height: 80, borderRadius: "50%", background: "linear-gradient(135deg,#1e3a5f,#2563a8)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 32 }}>⏳</div>
-                </div>
-                <h2 style={{ margin: 0, fontSize: 19, fontWeight: "800", color: "#1e3a5f" }}>في انتظار موافقة المدير</h2>
-                <p style={{ margin: "8px 0 0", fontSize: 13, color: "#64748b" }}>
-                  تم إرسال طلب اعتماد الجهاز "<strong>{deviceName || name}</strong>"<br />
-                  للمدير — ستدخل تلقائياً بعد الموافقة
-                </p>
-              </div>
-
-              {/* أنيميشن انتظار */}
-              <div style={{ display: "flex", justifyContent: "center", gap: 8, marginBottom: 20 }}>
-                {[0, 1, 2].map(i => (
-                  <div key={i} style={{ width: 10, height: 10, borderRadius: "50%", background: "#2563a8", animation: `spin 1.2s ease-in-out infinite`, animationDelay: `${i * 0.2}s`,
-                    animationName: "bounce2" }} />
-                ))}
-              </div>
-              <style>{`@keyframes bounce2{0%,80%,100%{transform:scale(0.6);opacity:0.4}40%{transform:scale(1.2);opacity:1}}`}</style>
-
-              <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 10, padding: "12px 14px", fontSize: 12, color: "#92400e", marginBottom: 14 }}>
-                💡 اترك هذه الصفحة مفتوحة — ستنتقل تلقائياً بمجرد موافقة المدير
-              </div>
-
-              <button onClick={onAdminBypass} style={{
-                width: "100%", padding: "10px", background: "transparent",
-                color: "#94a3b8", border: "1px solid #e2e8f0", borderRadius: 12,
-                fontSize: 13, fontWeight: "700", cursor: "pointer", fontFamily: "Cairo, Arial",
-              }}>👑 دخول كمدير</button>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════
-//  DEVICE REJECTED SCREEN
-// ══════════════════════════════════════════════
-function DeviceRejectedScreen({ onRetry, onAdminBypass }) {
-  return (
-    <div style={{
-      minHeight: "100vh", direction: "rtl", fontFamily: "Cairo, Arial",
-      background: "linear-gradient(135deg,#1a0a0a,#7f1d1d)",
-      display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
-    }}>
-      <div style={{ background: "white", borderRadius: 24, padding: "40px 32px", maxWidth: 400, width: "100%", textAlign: "center", boxShadow: "0 30px 80px rgba(0,0,0,0.5)" }}>
-        <div style={{ fontSize: 56, marginBottom: 12 }}>🚫</div>
-        <h2 style={{ color: "#dc2626", fontSize: 20, fontWeight: "800", marginBottom: 8 }}>جهاز مرفوض</h2>
-        <p style={{ color: "#64748b", fontSize: 14, marginBottom: 24 }}>
-          هذا الجهاز تم رفضه من قبل المدير.<br />تواصل مع المدير لإعادة التفعيل.
-        </p>
-        <button onClick={onRetry} style={{ width: "100%", padding: "12px", background: "#1e3a5f", color: "white", border: "none", borderRadius: 12, fontSize: 15, fontWeight: "800", cursor: "pointer", fontFamily: "Cairo, Arial", marginBottom: 10 }}>
-          🔄 إرسال طلب جديد
-        </button>
-        <button onClick={onAdminBypass} style={{ width: "100%", padding: "10px", background: "transparent", color: "#94a3b8", border: "1px solid #e2e8f0", borderRadius: 12, fontSize: 13, fontWeight: "700", cursor: "pointer", fontFamily: "Cairo, Arial" }}>
-          👑 دخول كمدير
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════
-//  TAB: BRANCHES MANAGEMENT (Admin)
-// ══════════════════════════════════════════════
-function TabBranches({ branches, setBranches, employees, setEmployees, toast }) {
-  const [modal, setModal] = useState(null);
-  const [form, setForm] = useState({ name: "", code: "" });
-  const [delConfirm, setDelConfirm] = useState(null);
-
-  function generateCode(name) {
-    return "BRANCH-" + name.replace(/\s+/g, "-").toUpperCase().slice(0, 12) + "-" + Math.floor(1000 + Math.random() * 9000);
-  }
-
-  function openAdd() {
-    setForm({ name: "", code: "" });
-    setModal("add");
-  }
-
-  function openEdit(b) {
-    setForm({ name: b.name, code: b.code });
-    setModal(b);
-  }
-
-  function saveBranch() {
-    if (!form.name.trim() || !form.code.trim()) { toast("اسم الفرع والكود مطلوبين", "error"); return; }
-    const codeUp = form.code.trim().toUpperCase();
-    // تأكد الكود مش مكرر
-    const dup = branches.find(b => b.code === codeUp && (modal === "add" || b.id !== modal.id));
-    if (dup) { toast("هذا الكود موجود بالفعل لفرع آخر!", "error"); return; }
-    if (modal === "add") {
-      const newBranch = { id: generateId(), name: form.name.trim(), code: codeUp, createdAt: getToday() };
-      setBranches(p => [...p, newBranch]);
-      toast("✅ تم إضافة الفرع بنجاح");
-    } else {
-      setBranches(p => p.map(b => b.id === modal.id ? { ...b, name: form.name.trim(), code: codeUp } : b));
-      toast("✅ تم تعديل بيانات الفرع");
-    }
-    setModal(null);
-  }
-
-  function deleteBranch(id) {
-    const hasEmps = employees.some(e => e.branchId === id);
-    if (hasEmps) { toast("لا يمكن حذف فرع به موظفين! انقل الموظفين أولاً", "error"); setDelConfirm(null); return; }
-    setBranches(p => p.filter(b => b.id !== id));
-    toast("🗑️ تم حذف الفرع", "error");
-    setDelConfirm(null);
-  }
-
-  return (
-    <div>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
-        <h2 style={{ margin: 0, color: "#1e3a5f", fontSize: 20, fontWeight: "800" }}>🏪 إدارة الفروع</h2>
-        <button onClick={openAdd} style={{ padding: "10px 20px", background: "#1e3a5f", color: "white", border: "none", borderRadius: 10, fontWeight: "700", cursor: "pointer", fontSize: 14, fontFamily: "Cairo, Arial" }}>
-          ➕ فرع جديد
-        </button>
-      </div>
-
-      {/* Info card */}
-      <div style={{ background: "#eff6ff", border: "2px solid #bfdbfe", borderRadius: 12, padding: "14px 18px", marginBottom: 20, fontSize: 13, color: "#1e40af", fontWeight: "600" }}>
-        💡 كل فرع عنده كود سري — ادخل الكود ده على جهاز الفرع مرة واحدة وهيتذكره تلقائياً. الجهاز بعدها هيفتح شاشة الموظفين مباشرةً ويشوف موظفين الفرع ده بس.
-      </div>
-
-      {branches.length === 0 ? (
-        <div style={{ background: "white", borderRadius: 14, padding: 48, textAlign: "center", boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
-          <div style={{ fontSize: 48, marginBottom: 12 }}>🏪</div>
-          <p style={{ color: "#94a3b8", fontSize: 15, fontWeight: "700" }}>لا توجد فروع بعد</p>
-          <button onClick={openAdd} style={{ marginTop: 12, padding: "10px 24px", background: "#1e3a5f", color: "white", border: "none", borderRadius: 10, fontWeight: "700", cursor: "pointer", fontSize: 14, fontFamily: "Cairo, Arial" }}>
-            ➕ أضف أول فرع
-          </button>
-        </div>
-      ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 }}>
-          {branches.map(b => {
-            const empCount = employees.filter(e => e.branchId === b.id).length;
-            return (
-              <div key={b.id} style={{ background: "white", borderRadius: 14, padding: 20, boxShadow: "0 2px 10px rgba(0,0,0,0.06)", border: "2px solid #f1f5f9" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-                  <div>
-                    <div style={{ fontWeight: "800", fontSize: 16, color: "#1e293b", marginBottom: 4 }}>🏪 {b.name}</div>
-                    <div style={{ fontSize: 12, color: "#64748b" }}>أُضيف: {b.createdAt}</div>
-                  </div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <button onClick={() => openEdit(b)} style={{ padding: "6px 10px", background: "#eff6ff", color: "#2563a8", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: "700", fontFamily: "Cairo, Arial" }}>✏️</button>
-                    <button onClick={() => setDelConfirm(b)} style={{ padding: "6px 10px", background: "#fef2f2", color: "#dc2626", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: "700", fontFamily: "Cairo, Arial" }}>🗑️</button>
-                  </div>
-                </div>
-                {/* Code badge */}
-                <div style={{ background: "#1e3a5f", color: "white", padding: "8px 14px", borderRadius: 8, fontFamily: "monospace", fontSize: 14, fontWeight: "700", letterSpacing: 1, textAlign: "center", marginBottom: 12 }}>
-                  🔑 {b.code}
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontSize: 13, color: "#475569", fontWeight: "600" }}>👥 {empCount} موظف</span>
-                  <span style={{ fontSize: 11, background: empCount > 0 ? "#f0fdf4" : "#f8fafc", color: empCount > 0 ? "#16a34a" : "#94a3b8", padding: "2px 10px", borderRadius: 20, fontWeight: "700" }}>
-                    {empCount > 0 ? "نشط" : "لا يوجد موظفين"}
-                  </span>
-                </div>
-                {/* Reset device tip */}
-                <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
-                  <button
-                    onClick={() => { navigator.clipboard?.writeText(b.name).catch(()=>{}); toast(`✅ تم نسخ اسم ${b.name}`); }}
-                    style={{ flex: 1, padding: "7px 10px", background: "#f0f9ff", color: "#0891b2", border: "1px solid #bae6fd", borderRadius: 7, fontWeight: "700", cursor: "pointer", fontSize: 12, fontFamily: "Cairo, Arial" }}>
-                    📋 نسخ الاسم
-                  </button>
-                  <button
-                    onClick={() => toast(`💡 لإدارة أجهزة ${b.name} — اذهب لتاب "الأجهزة"`, "info")}
-                    style={{ flex: 1, padding: "7px 10px", background: "#fff7ed", color: "#d97706", border: "1px solid #fed7aa", borderRadius: 7, fontWeight: "700", cursor: "pointer", fontSize: 12, fontFamily: "Cairo, Arial" }}>
-                    📱 الأجهزة
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Add/Edit Modal */}
-      {modal && (
-        <Modal title={modal === "add" ? "➕ فرع جديد" : "✏️ تعديل الفرع"} onClose={() => setModal(null)}>
-          <div style={{ marginBottom: 14 }}>
-            <label style={{ display: "block", marginBottom: 6, fontSize: 13, fontWeight: "700", color: "#374151" }}>اسم الفرع</label>
-            <input value={form.name} onChange={e => {
-              const name = e.target.value;
-              setForm(p => ({ ...p, name, code: modal === "add" ? generateCode(name) : p.code }));
-            }}
-              placeholder="مثال: فرع القاهرة"
-              style={{ width: "100%", padding: "10px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial" }}
-              onFocus={e => e.target.style.borderColor = "#2563a8"}
-              onBlur={e => e.target.style.borderColor = "#e2e8f0"}
-            />
-          </div>
-          <div style={{ marginBottom: 14 }}>
-            <label style={{ display: "block", marginBottom: 6, fontSize: 13, fontWeight: "700", color: "#374151" }}>كود الفرع (سري)</label>
-            <input value={form.code} onChange={e => setForm(p => ({ ...p, code: e.target.value.toUpperCase() }))}
-              placeholder="BRANCH-CAIRO-01"
-              style={{ width: "100%", padding: "10px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "monospace", letterSpacing: 1, fontWeight: "700" }}
-              onFocus={e => e.target.style.borderColor = "#2563a8"}
-              onBlur={e => e.target.style.borderColor = "#e2e8f0"}
-            />
-            <p style={{ margin: "5px 0 0", fontSize: 11, color: "#94a3b8" }}>الكود بيتولد تلقائياً — تقدر تعدله. أعطيه لمسؤول الفرع فقط.</p>
-          </div>
-          <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-            <button onClick={saveBranch} style={{ flex: 1, padding: "11px", background: "#1e3a5f", color: "white", border: "none", borderRadius: 8, fontWeight: "700", fontSize: 15, cursor: "pointer", fontFamily: "Cairo, Arial" }}>
-              {modal === "add" ? "إضافة الفرع" : "حفظ التعديلات"}
-            </button>
-            <button onClick={() => setModal(null)} style={{ flex: 1, padding: "11px", background: "#f1f5f9", color: "#64748b", border: "none", borderRadius: 8, fontWeight: "700", fontSize: 15, cursor: "pointer", fontFamily: "Cairo, Arial" }}>إلغاء</button>
-          </div>
-        </Modal>
-      )}
-
-      {/* Delete Confirm */}
-      {delConfirm && (
-        <Modal title="⚠️ تأكيد الحذف" onClose={() => setDelConfirm(null)}>
-          <p style={{ fontSize: 14, color: "#374151", marginBottom: 20, fontWeight: "600" }}>
-            هل تريد حذف فرع "<strong>{delConfirm.name}</strong>"؟ لا يمكن التراجع.
-          </p>
-          <div style={{ display: "flex", gap: 10 }}>
-            <button onClick={() => deleteBranch(delConfirm.id)} style={{ flex: 1, padding: "11px", background: "#dc2626", color: "white", border: "none", borderRadius: 8, fontWeight: "700", fontSize: 15, cursor: "pointer", fontFamily: "Cairo, Arial" }}>🗑️ حذف</button>
-            <button onClick={() => setDelConfirm(null)} style={{ flex: 1, padding: "11px", background: "#f1f5f9", color: "#64748b", border: "none", borderRadius: 8, fontWeight: "700", fontSize: 15, cursor: "pointer", fontFamily: "Cairo, Arial" }}>إلغاء</button>
-          </div>
-        </Modal>
-      )}
-    </div>
-  );
-}
-
-
-function LoginScreen({ onLogin, settings, employees: empFromDB, branches, deviceBranchId, adminOnly }) {
-  const [role, setRole] = useState(adminOnly ? "admin" : "employee");
+function LoginScreen({ onLogin, settings, employees: empFromDB }) {
+  const [role, setRole] = useState("employee");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [showPass, setShowPass] = useState(false);
   const [time, setTime] = useState(new Date());
-
-  // اسم الفرع المسجّل على هذا الجهاز
-  const deviceBranch = deviceBranchId && branches
-    ? branches.find(b => b.id === deviceBranchId)
-    : null;
 
   useEffect(() => {
     const t = setInterval(() => setTime(new Date()), 1000);
@@ -1094,11 +633,11 @@ function LoginScreen({ onLogin, settings, employees: empFromDB, branches, device
     setError("");
     if (!username || !password) { setError("من فضلك أدخل اسم المستخدم وكلمة السر"); return; }
     if (role === "admin") {
-      // المدير يدخل من أي مكان بدون قيود
       if (username === settings.adminUsername && password === settings.adminPassword) {
         onLogin({ role: "admin", name: settings.companyName || "المدير" });
       } else { setError("اسم المستخدم أو كلمة السر غير صحيحة"); }
     } else {
+      // نستخدم الموظفين من Firebase أولاً، وإلا من localStorage كـ fallback
       const employees = (empFromDB && empFromDB.length > 0)
         ? empFromDB
         : JSON.parse(localStorage.getItem(KEYS.employees) || JSON.stringify(DEFAULT_EMPLOYEES));
@@ -1150,16 +689,9 @@ function LoginScreen({ onLogin, settings, employees: empFromDB, branches, device
             <div style={{ fontSize: 48, marginBottom: 8, animation: "float 3s ease-in-out infinite" }}>🏢</div>
             <h1 style={{ margin: 0, fontSize: 22, fontWeight: "800", color: "#1e3a5f" }}>نظام الحضور والانصراف</h1>
             <p style={{ margin: "4px 0 0", fontSize: 13, color: "#94a3b8" }}>{settings.companyName}</p>
-            {deviceBranch && (
-              <div style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 6, background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 20, padding: "4px 14px" }}>
-                <span style={{ fontSize: 14 }}>🏪</span>
-                <span style={{ fontSize: 13, fontWeight: "800", color: "#16a34a" }}>{deviceBranch.name}</span>
-              </div>
-            )}
           </div>
 
           {/* Role Toggle */}
-          {!adminOnly && (
           <div style={{ display: "flex", background: "#f1f5f9", borderRadius: 14, padding: 4, marginBottom: 24, gap: 4 }}>
             {[{ val: "employee", label: "👤 موظف" }, { val: "admin", label: "👑 مدير" }].map(r => (
               <button key={r.val} onClick={() => { setRole(r.val); setError(""); setUsername(""); setPassword(""); }}
@@ -1172,15 +704,6 @@ function LoginScreen({ onLogin, settings, employees: empFromDB, branches, device
                 }}>{r.label}</button>
             ))}
           </div>
-          )}
-          {adminOnly && (
-          <div style={{ display: "flex", justifyContent: "center", marginBottom: 24 }}>
-            <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "#1e3a5f", borderRadius: 12, padding: "10px 24px" }}>
-              <span style={{ fontSize: 18 }}>👑</span>
-              <span style={{ color: "white", fontWeight: "800", fontSize: 15 }}>دخول المدير</span>
-            </div>
-          </div>
-          )}
 
           {/* Fields */}
           {[
@@ -1274,8 +797,8 @@ function LoginScreen({ onLogin, settings, employees: empFromDB, branches, device
 // ══════════════════════════════════════════════
 //  EMPLOYEE FORM MODAL
 // ══════════════════════════════════════════════
-function EmployeeFormModal({ emp, onSave, onClose, shifts, branches }) {
-  const [form, setForm] = useState(emp || { name: "", username: "", password: "", department: "", phone: "", shiftId: shifts[0]?.id || "", branchId: "" });
+function EmployeeFormModal({ emp, onSave, onClose, shifts }) {
+  const [form, setForm] = useState(emp || { name: "", username: "", password: "", department: "", phone: "", shiftId: shifts[0]?.id || "" });
   const [err, setErr] = useState("");
 
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
@@ -1334,19 +857,6 @@ function EmployeeFormModal({ emp, onSave, onClose, shifts, branches }) {
           </div>
         )}
       </div>
-      {/* Branch selector */}
-      {branches && branches.length > 0 && (
-        <div style={{ marginBottom: 14 }}>
-          <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>الفرع</label>
-          <select value={form.branchId || ""} onChange={e => set("branchId", e.target.value)}
-            style={{ width: "100%", padding: "10px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial", background: "white" }}
-            onFocus={e => e.target.style.borderColor = "#2563a8"}
-            onBlur={e => e.target.style.borderColor = "#e2e8f0"}>
-            <option value="">— بدون فرع —</option>
-            {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-          </select>
-        </div>
-      )}
       {err && <div style={{ color: "#dc2626", fontSize: 13, marginBottom: 12, fontWeight: "600" }}>⚠️ {err}</div>}
       <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
         <button onClick={save} style={{ flex: 1, padding: "11px", background: "#1e3a5f", color: "white", border: "none", borderRadius: 8, fontWeight: "700", fontSize: 15, cursor: "pointer", fontFamily: "Cairo, Arial" }}>
@@ -1363,7 +873,7 @@ function EmployeeFormModal({ emp, onSave, onClose, shifts, branches }) {
 // ══════════════════════════════════════════════
 //  TAB: EMPLOYEES MANAGEMENT
 // ══════════════════════════════════════════════
-function TabEmployees({ employees, setEmployees, records, toast, shifts, branches }) {
+function TabEmployees({ employees, setEmployees, records, toast, shifts }) {
   const [modal, setModal] = useState(null);
   const [search, setSearch] = useState("");
   const [delConfirm, setDelConfirm] = useState(null);
@@ -1396,7 +906,7 @@ function TabEmployees({ employees, setEmployees, records, toast, shifts, branche
 
   return (
     <div>
-      {modal && <EmployeeFormModal emp={modal === "add" ? null : modal} onSave={saveEmployee} onClose={() => setModal(null)} shifts={shifts} branches={branches || []} />}
+      {modal && <EmployeeFormModal emp={modal === "add" ? null : modal} onSave={saveEmployee} onClose={() => setModal(null)} shifts={shifts} />}
       {delConfirm && (
         <Modal title="⚠️ تأكيد الحذف" onClose={() => setDelConfirm(null)}>
           <p style={{ color: "#374151", marginTop: 0 }}>هل أنت متأكد من حذف الموظف <strong>{delConfirm.name}</strong>؟</p>
@@ -1441,17 +951,16 @@ function TabEmployees({ employees, setEmployees, records, toast, shifts, branche
           <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Cairo, Arial" }}>
             <thead>
               <tr style={{ background: "#1e3a5f", color: "white" }}>
-                {["#", "الاسم الكامل", "اليوزر", "القسم", "الفرع", "الشيفت", "الموبايل", "أيام الحضور", "الإجراءات"].map(h => (
+                {["#", "الاسم الكامل", "اليوزر", "القسم", "الشيفت", "الموبايل", "أيام الحضور", "الإجراءات"].map(h => (
                   <th key={h} style={{ padding: "13px 14px", textAlign: "right", fontSize: 13, fontWeight: "700", whiteSpace: "nowrap" }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filtered.length === 0 ? (
-                <tr><td colSpan={9} style={{ textAlign: "center", padding: 32, color: "#94a3b8", fontSize: 15 }}>لا يوجد موظفين</td></tr>
+                <tr><td colSpan={8} style={{ textAlign: "center", padding: 32, color: "#94a3b8", fontSize: 15 }}>لا يوجد موظفين</td></tr>
               ) : filtered.map((emp, i) => {
                 const shift = getShift(emp.shiftId);
-                const branch = (branches || []).find(b => b.id === emp.branchId);
                 return (
                   <tr key={emp.id} style={{ background: i % 2 === 0 ? "#f8fafc" : "white", transition: "background 0.15s" }}
                     onMouseEnter={e => e.currentTarget.style.background = "#eff6ff"}
@@ -1471,13 +980,6 @@ function TabEmployees({ employees, setEmployees, records, toast, shifts, branche
                     </td>
                     <td style={{ padding: "12px 14px", color: "#475569" }}>
                       <span style={{ background: "#eff6ff", color: "#2563a8", padding: "3px 10px", borderRadius: 20, fontSize: 12, fontWeight: "700" }}>{emp.department || "-"}</span>
-                    </td>
-                    <td style={{ padding: "12px 14px" }}>
-                      {branch ? (
-                        <span style={{ background: "#f0fdf4", color: "#16a34a", padding: "3px 10px", borderRadius: 20, fontSize: 12, fontWeight: "700", whiteSpace: "nowrap" }}>
-                          🏪 {branch.name}
-                        </span>
-                      ) : <span style={{ color: "#94a3b8", fontSize: 12 }}>—</span>}
                     </td>
                     <td style={{ padding: "12px 14px" }}>
                       {shift ? (
@@ -1511,23 +1013,13 @@ function TabEmployees({ employees, setEmployees, records, toast, shifts, branche
 // ══════════════════════════════════════════════
 //  TAB: ATTENDANCE RECORDS
 // ══════════════════════════════════════════════
-function TabAttendance({ employees, records, toast, settings, branches }) {
+function TabAttendance({ employees, records, toast, settings }) {
   const [filterEmp, setFilterEmp] = useState("all");
   const [filterFrom, setFilterFrom] = useState("");
   const [filterTo, setFilterTo] = useState("");
-  const [filterBranch, setFilterBranch] = useState("all");
-
-  // الموظفين المفلترين بالفرع (للـ dropdown)
-  const empsByBranch = filterBranch === "all"
-    ? employees
-    : employees.filter(e => e.branchId === filterBranch);
 
   const filtered = records.filter(r => {
     if (filterEmp !== "all" && r.employeeId !== filterEmp) return false;
-    if (filterBranch !== "all") {
-      const emp = employees.find(e => e.id === r.employeeId);
-      if (!emp || emp.branchId !== filterBranch) return false;
-    }
     if (filterFrom && r.date < filterFrom) return false;
     if (filterTo && r.date > filterTo) return false;
     return true;
@@ -1829,17 +1321,10 @@ function TabAttendance({ employees, records, toast, settings, branches }) {
 
       {/* FILTERS */}
       <div style={{ background: "white", borderRadius: 12, padding: 16, marginBottom: 16, display: "flex", gap: 12, flexWrap: "wrap", boxShadow: "0 2px 8px rgba(0,0,0,0.06)", alignItems: "center" }}>
-        {branches && branches.length > 0 && (
-          <select value={filterBranch} onChange={e => { setFilterBranch(e.target.value); setFilterEmp("all"); }}
-            style={{ padding: "8px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial", minWidth: 140, background: filterBranch !== "all" ? "#eff6ff" : "white", borderColor: filterBranch !== "all" ? "#2563a8" : "#e2e8f0" }}>
-            <option value="all">🏪 كل الفروع</option>
-            {branches.map(b => <option key={b.id} value={b.id}>🏪 {b.name}</option>)}
-          </select>
-        )}
         <select value={filterEmp} onChange={e => setFilterEmp(e.target.value)}
           style={{ padding: "8px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial", minWidth: 160 }}>
           <option value="all">كل الموظفين</option>
-          {empsByBranch.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+          {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
         </select>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ fontSize: 12, color: "#64748b", fontWeight: "700" }}>من</span>
@@ -1851,7 +1336,7 @@ function TabAttendance({ employees, records, toast, settings, branches }) {
           <input type="date" value={filterTo} onChange={e => setFilterTo(e.target.value)}
             style={{ padding: "8px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial" }} />
         </div>
-        <button onClick={() => { setFilterEmp("all"); setFilterFrom(""); setFilterTo(""); setFilterBranch("all"); }}
+        <button onClick={() => { setFilterEmp("all"); setFilterFrom(""); setFilterTo(""); }}
           style={{ padding: "8px 14px", background: "#f1f5f9", color: "#64748b", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 13, fontFamily: "Cairo, Arial" }}>
           🔄 مسح
         </button>
@@ -1864,23 +1349,17 @@ function TabAttendance({ employees, records, toast, settings, branches }) {
           <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Cairo, Arial" }}>
             <thead>
               <tr style={{ background: "#1e3a5f", color: "white" }}>
-                {["الاسم", "الفرع", "التاريخ", "اليوم", "الحضور", "الانصراف", "ساعات العمل", "التأخير", "الحالة"].map(h => (
+                {["الاسم", "التاريخ", "اليوم", "الحضور", "الانصراف", "ساعات العمل", "التأخير", "الحالة"].map(h => (
                   <th key={h} style={{ padding: "12px 14px", textAlign: "right", fontSize: 13, fontWeight: "700", whiteSpace: "nowrap" }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filtered.length === 0 ? (
-                <tr><td colSpan={9} style={{ textAlign: "center", padding: 32, color: "#94a3b8" }}>لا توجد سجلات</td></tr>
-              ) : filtered.map((r, i) => {
-                const empBranch = branches && employees.find(e => e.id === r.employeeId)?.branchId;
-                const branchName = empBranch ? (branches || []).find(b => b.id === empBranch)?.name : null;
-                return (
+                <tr><td colSpan={8} style={{ textAlign: "center", padding: 32, color: "#94a3b8" }}>لا توجد سجلات</td></tr>
+              ) : filtered.map((r, i) => (
                 <tr key={r.id} style={{ background: i % 2 === 0 ? "#f8fafc" : "white" }}>
                   <td style={{ padding: "11px 14px", fontWeight: "700", color: "#1e293b" }}>{getEmpName(r.employeeId)}</td>
-                  <td style={{ padding: "11px 14px" }}>
-                    {branchName ? <span style={{ background: "#f0fdf4", color: "#16a34a", padding: "2px 8px", borderRadius: 20, fontSize: 11, fontWeight: "700", whiteSpace: "nowrap" }}>🏪 {branchName}</span> : <span style={{ color: "#cbd5e1", fontSize: 12 }}>—</span>}
-                  </td>
                   <td style={{ padding: "11px 14px", color: "#475569", fontSize: 13 }}>{r.date}</td>
                   <td style={{ padding: "11px 14px", color: "#475569", fontSize: 13 }}>{dayNameAr(r.date)}</td>
                   <td style={{ padding: "11px 14px", color: "#059669", fontWeight: "700" }}>{r.checkIn || "—"}</td>
@@ -1891,8 +1370,7 @@ function TabAttendance({ employees, records, toast, settings, branches }) {
                   </td>
                   <td style={{ padding: "11px 14px" }}><span style={statusStyle(r.status)}>{r.status}</span></td>
                 </tr>
-                );
-              })}
+              ))}
             </tbody>
           </table>
         </div>
@@ -1910,20 +1388,14 @@ function TabAttendance({ employees, records, toast, settings, branches }) {
 // ══════════════════════════════════════════════
 //  TAB: MONTHLY REPORT
 // ══════════════════════════════════════════════
-function TabMonthlyReport({ employees, records, settings, toast, shifts, branches }) {
+function TabMonthlyReport({ employees, records, settings, toast, shifts }) {
   const [selEmp, setSelEmp] = useState("");
   const [selMonth, setSelMonth] = useState(String(new Date().getMonth() + 1).padStart(2, "0"));
   const [selYear, setSelYear] = useState(String(new Date().getFullYear()));
   const [report, setReport] = useState(null);
-  const [filterBranch, setFilterBranch] = useState("all");
 
   const months = ["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر"];
   const years = ["2024", "2025", "2026", "2027"];
-
-  // موظفين مفلترين بالفرع
-  const filteredEmps = filterBranch === "all"
-    ? employees
-    : employees.filter(e => e.branchId === filterBranch);
 
   function generateReport() {
     if (!selEmp) { toast("اختر موظفاً أولاً", "error"); return; }
@@ -1959,10 +1431,7 @@ function TabMonthlyReport({ employees, records, settings, toast, shifts, branche
       if (!r.checkIn || !r.checkOut) return a;
       const [ih, im] = r.checkIn.split(":").map(Number);
       const [oh, om] = r.checkOut.split(":").map(Number);
-      let diff = (oh * 60 + om) - (ih * 60 + im);
-      if (diff <= 0) diff += 24 * 60; // شيفت يعدي منتصف الليل
-      if (diff > 24 * 60) return a;   // بيانات غلط — نتجاهلها
-      return a + diff;
+      return a + (oh * 60 + om) - (ih * 60 + im);
     }, 0);
     const attendanceRate = rows.length > 0 ? Math.round((present / rows.length) * 100) : 0;
     setReport({
@@ -2062,22 +1531,12 @@ function TabMonthlyReport({ employees, records, settings, toast, shifts, branche
 
       <div style={{ background: "white", borderRadius: 14, padding: 20, marginBottom: 20, boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
-          {branches && branches.length > 0 && (
-            <div>
-              <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>الفرع</label>
-              <select value={filterBranch} onChange={e => { setFilterBranch(e.target.value); setSelEmp(""); setReport(null); }}
-                style={{ padding: "9px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial", minWidth: 150, background: filterBranch !== "all" ? "#eff6ff" : "white", borderColor: filterBranch !== "all" ? "#2563a8" : "#e2e8f0" }}>
-                <option value="all">🏪 كل الفروع</option>
-                {branches.map(b => <option key={b.id} value={b.id}>🏪 {b.name}</option>)}
-              </select>
-            </div>
-          )}
           <div>
             <label style={{ display: "block", marginBottom: 5, fontSize: 13, fontWeight: "700", color: "#374151" }}>اختر الموظف</label>
             <select value={selEmp} onChange={e => setSelEmp(e.target.value)}
               style={{ padding: "9px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 14, fontFamily: "Cairo, Arial", minWidth: 200 }}>
               <option value="">— اختر موظفاً —</option>
-              {filteredEmps.map(e => {
+              {employees.map(e => {
                 const sh = shifts?.find(s => s.id === e.shiftId);
                 return <option key={e.id} value={e.id}>{e.name}{sh ? ` — ${sh.name}` : ""}</option>;
               })}
@@ -2181,7 +1640,7 @@ function TabMonthlyReport({ employees, records, settings, toast, shifts, branche
 // ══════════════════════════════════════════════
 //  TAB: STATISTICS
 // ══════════════════════════════════════════════
-function TabStatistics({ employees, records, settings, branches }) {
+function TabStatistics({ employees, records, settings }) {
   const today = getToday();
   const todayRecs = records.filter(r => r.date === today);
   const presentToday = todayRecs.length;
@@ -2208,18 +1667,6 @@ function TabStatistics({ employees, records, settings, branches }) {
   // Dept breakdown
   const depts = {};
   employees.forEach(e => { depts[e.department || "غير محدد"] = (depts[e.department || "غير محدد"] || 0) + 1; });
-
-  // Branch breakdown stats
-  const branchStats = (branches || []).map(b => {
-    const branchEmps = employees.filter(e => e.branchId === b.id);
-    const branchTodayRecs = records.filter(r => r.date === today && branchEmps.some(e => e.id === r.employeeId));
-    const present = branchTodayRecs.filter(r => r.status === "حاضر" || r.status === "متأخر").length;
-    const absent = branchEmps.length - branchTodayRecs.length;
-    const late = branchTodayRecs.filter(r => r.status === "متأخر").length;
-    const rate = branchEmps.length > 0 ? Math.round((present / branchEmps.length) * 100) : 0;
-    return { ...b, empCount: branchEmps.length, present, absent, late, rate };
-  });
-  const unassignedEmps = employees.filter(e => !e.branchId || !(branches || []).find(b => b.id === e.branchId));
 
   // Top punctual employees this month
   const monthPrefix = today.slice(0, 7);
@@ -2337,42 +1784,6 @@ function TabStatistics({ employees, records, settings, branches }) {
           ))}
         </div>
       </div>
-
-      {/* Branches Breakdown — يظهر بس لما في فروع */}
-      {branchStats.length > 0 && (
-        <div style={{ background: "white", borderRadius: 14, padding: 20, marginBottom: 20, boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
-          <h3 style={{ margin: "0 0 16px", color: "#1e3a5f", fontSize: 15, fontWeight: "800" }}>🏪 حضور الفروع — اليوم</h3>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px,1fr))", gap: 14 }}>
-            {branchStats.map((b, i) => {
-              const branchColors = ["#2563a8","#16a34a","#d97706","#7c3aed","#0891b2","#dc2626"];
-              const col = branchColors[i % branchColors.length];
-              return (
-                <div key={b.id} style={{ border: `2px solid ${col}20`, borderRadius: 12, padding: "16px 14px", background: `${col}06` }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                    <div style={{ fontWeight: "800", fontSize: 14, color: "#1e293b" }}>🏪 {b.name}</div>
-                    <span style={{ fontSize: 13, fontWeight: "800", color: b.rate >= 80 ? "#16a34a" : b.rate >= 50 ? "#d97706" : "#dc2626" }}>{b.rate}%</span>
-                  </div>
-                  <div style={{ height: 8, background: "#f1f5f9", borderRadius: 99, overflow: "hidden", marginBottom: 10 }}>
-                    <div style={{ height: "100%", width: `${b.rate}%`, background: col, borderRadius: 99, transition: "width 0.6s" }} />
-                  </div>
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <span style={{ fontSize: 12, fontWeight: "700", color: "#16a34a" }}>✅ {b.present} حاضر</span>
-                    <span style={{ fontSize: 12, fontWeight: "700", color: "#d97706" }}>⚠️ {b.late} متأخر</span>
-                    <span style={{ fontSize: 12, fontWeight: "700", color: "#dc2626" }}>❌ {b.absent} غائب</span>
-                    <span style={{ fontSize: 12, color: "#64748b", marginRight: "auto" }}>👥 {b.empCount} موظف</span>
-                  </div>
-                </div>
-              );
-            })}
-            {unassignedEmps.length > 0 && (
-              <div style={{ border: "2px solid #e2e8f0", borderRadius: 12, padding: "16px 14px", background: "#f8fafc" }}>
-                <div style={{ fontWeight: "800", fontSize: 14, color: "#64748b", marginBottom: 8 }}>👤 بدون فرع</div>
-                <div style={{ fontSize: 12, color: "#94a3b8", fontWeight: "600" }}>{unassignedEmps.length} موظف غير مخصصين لفرع</div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Weekly Summary Table */}
       <div style={{ background: "white", borderRadius: 14, overflow: "hidden", boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
@@ -2977,144 +2388,21 @@ function TabMessages({ employees, messages, setMessages, toast }) {
 // ══════════════════════════════════════════════
 //  ADMIN DASHBOARD
 // ══════════════════════════════════════════════
-// ══════════════════════════════════════════════
-//  TAB: DEVICES MANAGEMENT (Admin)
-// ══════════════════════════════════════════════
-function TabDevices({ devices, branches, approveDevice, rejectDevice, deleteDevice, toast }) {
-  const [filterStatus, setFilterStatus] = useState("all");
-  const [filterBranch, setFilterBranch]  = useState("all");
-
-  const filtered = devices.filter(d => {
-    if (filterStatus !== "all" && d.status !== filterStatus) return false;
-    if (filterBranch !== "all" && d.branchId !== filterBranch) return false;
-    return true;
-  }).sort((a, b) => (b.requestedAt || "").localeCompare(a.requestedAt || ""));
-
-  const pendingCount = devices.filter(d => d.status === "pending").length;
-
-  const statusBadge = (s) => {
-    if (s === "approved") return { bg: "#f0fdf4", color: "#16a34a", label: "✅ معتمد" };
-    if (s === "pending")  return { bg: "#fffbeb", color: "#d97706", label: "⏳ في الانتظار" };
-    if (s === "rejected") return { bg: "#fef2f2", color: "#dc2626", label: "🚫 مرفوض" };
-    return { bg: "#f1f5f9", color: "#64748b", label: s };
-  };
-
-  return (
-    <div>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 10 }}>
-        <div>
-          <h2 style={{ margin: 0, color: "#1e3a5f", fontSize: 20, fontWeight: "800" }}>📱 إدارة الأجهزة</h2>
-          {pendingCount > 0 && (
-            <div style={{ marginTop: 4, fontSize: 13, color: "#d97706", fontWeight: "700" }}>
-              🔔 {pendingCount} طلب في الانتظار
-            </div>
-          )}
-        </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}
-            style={{ padding: "8px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 13, fontFamily: "Cairo, Arial", background: filterStatus !== "all" ? "#eff6ff" : "white", borderColor: filterStatus !== "all" ? "#2563a8" : "#e2e8f0" }}>
-            <option value="all">كل الحالات</option>
-            <option value="pending">⏳ في الانتظار</option>
-            <option value="approved">✅ معتمد</option>
-            <option value="rejected">🚫 مرفوض</option>
-          </select>
-          {branches.length > 0 && (
-            <select value={filterBranch} onChange={e => setFilterBranch(e.target.value)}
-              style={{ padding: "8px 12px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 13, fontFamily: "Cairo, Arial" }}>
-              <option value="all">🏪 كل الفروع</option>
-              {branches.map(b => <option key={b.id} value={b.id}>🏪 {b.name}</option>)}
-            </select>
-          )}
-        </div>
-      </div>
-
-      {pendingCount > 0 && filterStatus === "all" && (
-        <div style={{ background: "linear-gradient(135deg,#fffbeb,#fef3c7)", border: "2px solid #fde68a", borderRadius: 12, padding: "14px 18px", marginBottom: 18, display: "flex", alignItems: "center", gap: 12 }}>
-          <span style={{ fontSize: 28 }}>🔔</span>
-          <div>
-            <div style={{ fontWeight: "800", color: "#92400e", fontSize: 14 }}>يوجد {pendingCount} طلب جهاز في الانتظار</div>
-            <div style={{ fontSize: 12, color: "#b45309", marginTop: 2 }}>راجع الطلبات أدناه ووافق أو ارفض كل جهاز</div>
-          </div>
-        </div>
-      )}
-
-      {filtered.length === 0 ? (
-        <div style={{ background: "white", borderRadius: 14, padding: 48, textAlign: "center", boxShadow: "0 2px 10px rgba(0,0,0,0.06)" }}>
-          <div style={{ fontSize: 48, marginBottom: 12 }}>📱</div>
-          <p style={{ color: "#94a3b8", fontSize: 15, fontWeight: "700" }}>لا توجد أجهزة بعد</p>
-          <p style={{ color: "#cbd5e1", fontSize: 13 }}>ستظهر الأجهزة هنا عند طلب موظف الاعتماد</p>
-        </div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {filtered.map(d => {
-            const branch = branches.find(b => b.id === d.branchId);
-            const sb = statusBadge(d.status);
-            const reqDate = d.requestedAt ? new Date(d.requestedAt).toLocaleString("ar-EG") : "—";
-            return (
-              <div key={d.deviceId} style={{
-                background: "white", borderRadius: 14, padding: "18px 20px",
-                boxShadow: "0 2px 10px rgba(0,0,0,0.06)",
-                border: d.status === "pending" ? "2px solid #fde68a" : "2px solid #f1f5f9",
-              }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 10 }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
-                      <span style={{ fontWeight: "800", fontSize: 16, color: "#1e293b" }}>📱 {d.name || "جهاز بدون اسم"}</span>
-                      <span style={{ background: sb.bg, color: sb.color, padding: "2px 10px", borderRadius: 20, fontSize: 12, fontWeight: "700" }}>{sb.label}</span>
-                      {branch && <span style={{ background: "#f0fdf4", color: "#16a34a", padding: "2px 10px", borderRadius: 20, fontSize: 12, fontWeight: "700" }}>🏪 {branch.name}</span>}
-                    </div>
-                    <div style={{ fontSize: 11, color: "#94a3b8" }}>
-                      🕐 طلب في: {reqDate} &nbsp;|&nbsp;
-                      🔑 ID: <code style={{ fontSize: 10, background: "#f1f5f9", padding: "1px 5px", borderRadius: 3 }}>{d.deviceId?.slice(0, 18)}...</code>
-                    </div>
-                    {d.userAgent && <div style={{ fontSize: 10, color: "#cbd5e1", marginTop: 3, fontFamily: "monospace" }}>{d.userAgent.slice(0, 80)}</div>}
-                  </div>
-                  <div style={{ display: "flex", gap: 8, flexShrink: 0, flexWrap: "wrap" }}>
-                    {d.status !== "approved" && (
-                      <button onClick={() => { approveDevice(d.deviceId, d.branchId); toast(`✅ تم اعتماد "${d.name}"`); }}
-                        style={{ padding: "8px 16px", background: "#16a34a", color: "white", border: "none", borderRadius: 8, fontWeight: "800", cursor: "pointer", fontSize: 13, fontFamily: "Cairo, Arial" }}>
-                        ✅ موافقة
-                      </button>
-                    )}
-                    {d.status !== "rejected" && (
-                      <button onClick={() => { rejectDevice(d.deviceId); toast(`🚫 تم رفض "${d.name}"`, "error"); }}
-                        style={{ padding: "8px 16px", background: "#fef2f2", color: "#dc2626", border: "1px solid #fca5a5", borderRadius: 8, fontWeight: "800", cursor: "pointer", fontSize: 13, fontFamily: "Cairo, Arial" }}>
-                        🚫 رفض
-                      </button>
-                    )}
-                    <button onClick={() => { if (!window.confirm(`حذف "${d.name}"؟`)) return; deleteDevice(d.deviceId); toast("🗑️ تم حذف الجهاز", "error"); }}
-                      style={{ padding: "8px 12px", background: "#f1f5f9", color: "#64748b", border: "none", borderRadius: 8, fontWeight: "700", cursor: "pointer", fontSize: 13, fontFamily: "Cairo, Arial" }}>
-                      🗑️
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function AdminDashboard({ user, onLogout, db }) {
   const [tab, setTab] = useState("employees");
-  const { employees, setEmployees, records, setRecords, settings, setSettings, shifts, setShifts, messages, setMessages, branches, setBranches, devices, approveDevice, rejectDevice, deleteDevice } = db;
+  const { employees, setEmployees, records, setRecords, settings, setSettings, shifts, setShifts, messages, setMessages } = db;
   const { toasts, show: toast } = useToast();
 
   const unreadMsgsCount = messages ? messages.filter(m => !m.read).length : 0;
-  const pendingDevicesCount = devices ? devices.filter(d => d.status === "pending").length : 0;
 
   const tabs = [
     { id: "employees", label: "👥 الموظفين" },
-    { id: "branches",  label: "🏪 الفروع" },
-    { id: "devices",   label: pendingDevicesCount > 0 ? `📱 الأجهزة 🔴${pendingDevicesCount}` : "📱 الأجهزة" },
     { id: "attendance", label: "📊 الحضور" },
-    { id: "manual",    label: "📝 إدخال يدوي" },
-    { id: "report",    label: "📈 التقرير الشهري" },
+    { id: "manual", label: "📝 إدخال يدوي" },
+    { id: "report", label: "📈 التقرير الشهري" },
     { id: "statistics", label: "🏆 الإحصائيات" },
-    { id: "messages",  label: unreadMsgsCount > 0 ? `✉️ الرسائل 🔴${unreadMsgsCount}` : "✉️ الرسائل" },
-    { id: "settings",  label: "⚙️ الإعدادات" },
+    { id: "messages", label: unreadMsgsCount > 0 ? `✉️ الرسائل 🔴${unreadMsgsCount}` : "✉️ الرسائل" },
+    { id: "settings", label: "⚙️ الإعدادات" },
   ];
 
   return (
@@ -3193,15 +2481,13 @@ function AdminDashboard({ user, onLogout, db }) {
           </div>
         </div>
 
-        {tab === "employees"  && <TabEmployees employees={employees} setEmployees={setEmployees} records={records} toast={toast} shifts={shifts} branches={branches || []} />}
-        {tab === "branches"   && <TabBranches branches={branches || []} setBranches={setBranches} employees={employees} setEmployees={setEmployees} toast={toast} />}
-        {tab === "devices"    && <TabDevices devices={devices || []} branches={branches || []} approveDevice={approveDevice} rejectDevice={rejectDevice} deleteDevice={deleteDevice} toast={toast} />}
-        {tab === "attendance" && <TabAttendance employees={employees} records={records} toast={toast} settings={settings} branches={branches || []} />}
-        {tab === "manual"     && <TabManualAttendance employees={employees} records={records} setRecords={setRecords} settings={settings} shifts={shifts} toast={toast} branches={branches || []} />}
-        {tab === "report"     && <TabMonthlyReport employees={employees} records={records} settings={settings} toast={toast} shifts={shifts} branches={branches || []} />}
-        {tab === "statistics" && <TabStatistics employees={employees} records={records} settings={settings} branches={branches || []} />}
-        {tab === "messages"   && <TabMessages employees={employees} messages={messages || []} setMessages={setMessages} toast={toast} />}
-        {tab === "settings"   && <TabSettings settings={settings} setSettings={setSettings} employees={employees} setEmployees={setEmployees} records={records} setRecords={setRecords} toast={toast} shifts={shifts} setShifts={setShifts} />}
+        {tab === "employees" && <TabEmployees employees={employees} setEmployees={setEmployees} records={records} toast={toast} shifts={shifts} />}
+        {tab === "attendance" && <TabAttendance employees={employees} records={records} toast={toast} settings={settings} />}
+        {tab === "manual" && <TabManualAttendance employees={employees} records={records} setRecords={setRecords} settings={settings} shifts={shifts} toast={toast} />}
+        {tab === "report" && <TabMonthlyReport employees={employees} records={records} settings={settings} toast={toast} shifts={shifts} />}
+        {tab === "statistics" && <TabStatistics employees={employees} records={records} settings={settings} />}
+        {tab === "messages" && <TabMessages employees={employees} messages={messages || []} setMessages={setMessages} toast={toast} />}
+        {tab === "settings" && <TabSettings settings={settings} setSettings={setSettings} employees={employees} setEmployees={setEmployees} records={records} setRecords={setRecords} toast={toast} shifts={shifts} setShifts={setShifts} />}
       </div>
     </div>
   );
@@ -3211,34 +2497,13 @@ function AdminDashboard({ user, onLogout, db }) {
 //  EMPLOYEE DASHBOARD
 // ══════════════════════════════════════════════
 function EmployeeDashboard({ user, onLogout, db }) {
-  const { records, setRecords, settings, shifts, messages, setMessages, branches } = db;
+  const { records, setRecords, settings, shifts, messages, setMessages } = db;
   const { toasts, show: toast } = useToast();
   const [time, setTime] = useState(new Date());
   const [empTab, setEmpTab] = useState("home");
-  const [msgAlert, setMsgAlert] = useState(true);
+  const [msgAlert, setMsgAlert] = useState(true); // show alert on open
   const today = getToday();
   const todayRec = records.find(r => r.employeeId === user.id && r.date === today);
-
-  // الفرع المخصص للموظف
-  const empBranch = branches ? branches.find(b => b.id === user.branchId) : null;
-
-  // الجهاز الحالي معتمد على فرع إيه؟ نجيبه من Firebase عبر deviceId
-  const deviceId = getOrCreateDeviceId();
-  const [deviceApprovedBranchId, setDeviceApprovedBranchId] = useState(null);
-  useEffect(() => {
-    const fsdb = window.__fsdb;
-    if (!fsdb) return;
-    const unsub = fsdb.collection("devices").doc(deviceId).onSnapshot(snap => {
-      if (snap.exists && snap.data().status === "approved") {
-        setDeviceApprovedBranchId(snap.data().branchId || null);
-      }
-    });
-    return () => unsub();
-  }, [deviceId]);
-
-  // الموظف من فرع مختلف عن جهاز الفرع الحالي؟
-  const wrongBranch = deviceApprovedBranchId && user.branchId && deviceApprovedBranchId !== user.branchId && branches && branches.length > 0;
-  const deviceBranchName = wrongBranch ? (branches || []).find(b => b.id === deviceApprovedBranchId)?.name : null;
 
   // My unread messages
   const myMessages = (messages || []).filter(m => m.employeeId === user.id)
@@ -3270,7 +2535,6 @@ function EmployeeDashboard({ user, onLogout, db }) {
 
   function checkIn() {
     if (todayRec) { toast("سبق تسجيل الحضور اليوم!", "error"); return; }
-    if (wrongBranch) { toast(`❌ هذا الجهاز مخصص لفرع "${deviceBranchName}" — لا يمكنك تسجيل الحضور هنا`, "error"); return; }
     const now = getTimeNow();
     const late = calcLateMinutes(now, shiftStart, shiftTolerance);
     const rec = { id: generateId(), employeeId: user.id, date: today, checkIn: now, checkOut: null, status: late > 0 ? "متأخر" : "حاضر", lateMinutes: late, shiftId: user.shiftId || null };
@@ -3319,16 +2583,11 @@ function EmployeeDashboard({ user, onLogout, db }) {
           <div>
             <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 13 }}>مرحباً،</div>
             <div style={{ color: "white", fontWeight: "800", fontSize: 20 }}>{user.name}</div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
               <div style={{ color: "#94b8e0", fontSize: 12 }}>{user.department}</div>
               {empShift && (
                 <span style={{ background: `${empShift.color}`, color: "white", padding: "1px 8px", borderRadius: 10, fontSize: 11, fontWeight: "700" }}>
                   {empShift.name}
-                </span>
-              )}
-              {empBranch && (
-                <span style={{ background: "rgba(255,255,255,0.18)", color: "white", padding: "1px 8px", borderRadius: 10, fontSize: 11, fontWeight: "700" }}>
-                  🏪 {empBranch.name}
                 </span>
               )}
             </div>
@@ -3374,25 +2633,7 @@ function EmployeeDashboard({ user, onLogout, db }) {
 
       <div style={{ padding: 20, maxWidth: 720, margin: "0 auto" }}>
 
-        {/* ⚠️ WRONG BRANCH WARNING */}
-        {wrongBranch && (
-          <div style={{
-            marginBottom: 16, background: "linear-gradient(135deg,#7c1d1d,#dc2626)",
-            borderRadius: 14, padding: "16px 20px", boxShadow: "0 6px 20px rgba(220,38,38,0.35)",
-            display: "flex", alignItems: "center", gap: 14,
-          }}>
-            <div style={{ fontSize: 34, flexShrink: 0 }}>⚠️</div>
-            <div>
-              <div style={{ color: "white", fontWeight: "900", fontSize: 15, marginBottom: 4 }}>
-                أنت على جهاز فرع خطأ!
-              </div>
-              <div style={{ color: "rgba(255,255,255,0.85)", fontSize: 12, fontWeight: "600" }}>
-                هذا الجهاز مخصص لـ <strong>"{deviceBranchName}"</strong> — لكنك من فرع <strong>"{empBranch?.name || "آخر"}"</strong>.<br />
-                لا يمكنك تسجيل الحضور من هنا. استخدم جهاز فرعك.
-              </div>
-            </div>
-          </div>
-        )}
+        {/* 🔔 UNREAD MESSAGE ALERT POPUP */}
         {myUnread.length > 0 && msgAlert && empTab !== "messages" && (
           <div style={{
             marginBottom: 16,
@@ -3459,13 +2700,10 @@ function EmployeeDashboard({ user, onLogout, db }) {
               )}
 
               <div style={{ display: "flex", gap: 14, justifyContent: "center" }}>
-                <button onClick={checkIn} disabled={!!todayRec || !!wrongBranch} style={{
-                  padding: "15px 30px", border: "none", borderRadius: 14, fontWeight: "800", fontSize: 16,
-                  cursor: (todayRec || wrongBranch) ? "not-allowed" : "pointer", fontFamily: "Cairo, Arial",
-                  background: (todayRec || wrongBranch) ? "#e2e8f0" : "linear-gradient(135deg,#16a34a,#22c55e)",
-                  color: (todayRec || wrongBranch) ? "#94a3b8" : "white",
-                  boxShadow: (todayRec || wrongBranch) ? "none" : "0 6px 18px rgba(22,163,74,0.4)",
-                  animation: (!todayRec && !wrongBranch) ? "pulse2 2s ease-in-out infinite" : "none",
+                <button onClick={checkIn} disabled={!!todayRec} style={{
+                  padding: "15px 30px", border: "none", borderRadius: 14, fontWeight: "800", fontSize: 16, cursor: todayRec ? "not-allowed" : "pointer", fontFamily: "Cairo, Arial",
+                  background: todayRec ? "#e2e8f0" : "linear-gradient(135deg,#16a34a,#22c55e)", color: todayRec ? "#94a3b8" : "white",
+                  boxShadow: todayRec ? "none" : "0 6px 18px rgba(22,163,74,0.4)", animation: !todayRec ? "pulse2 2s ease-in-out infinite" : "none",
                 }}>✅ تسجيل حضور</button>
                 <button onClick={checkOut} disabled={!todayRec || !!todayRec?.checkOut} style={{
                   padding: "15px 30px", border: "none", borderRadius: 14, fontWeight: "800", fontSize: 16, cursor: (!todayRec || todayRec?.checkOut) ? "not-allowed" : "pointer", fontFamily: "Cairo, Arial",
@@ -3473,11 +2711,6 @@ function EmployeeDashboard({ user, onLogout, db }) {
                   boxShadow: (!todayRec || todayRec?.checkOut) ? "none" : "0 6px 18px rgba(220,38,38,0.4)",
                 }}>🚪 تسجيل انصراف</button>
               </div>
-              {wrongBranch && (
-                <div style={{ marginTop: 14, background: "#fef2f2", border: "1px solid #fca5a5", borderRadius: 10, padding: "10px 14px", fontSize: 13, color: "#dc2626", fontWeight: "700", textAlign: "center" }}>
-                  🚫 تسجيل الحضور معطّل — هذا الجهاز مخصص لفرع "{deviceBranchName}"، وليس فرعك
-                </div>
-              )}
             </div>
 
             {/* This Month Quick Stats */}
@@ -3665,7 +2898,7 @@ function EmployeeDashboard({ user, onLogout, db }) {
   );
 }
 // ══════════════════════════════════════════════
-function TabManualAttendance({ employees, records, setRecords, settings, shifts, toast, branches }) {
+function TabManualAttendance({ employees, records, setRecords, settings, shifts, toast }) {
   const [selEmp, setSelEmp] = useState("");
   const [selDate, setSelDate] = useState(getToday());
   const [checkIn, setCheckIn] = useState("");
@@ -3675,12 +2908,6 @@ function TabManualAttendance({ employees, records, setRecords, settings, shifts,
   const [delConfirm, setDelConfirm] = useState(null);
   const [filterEmp, setFilterEmp] = useState("all");
   const [filterDate, setFilterDate] = useState("");
-  const [filterBranch, setFilterBranch] = useState("all");
-
-  // الموظفين حسب الفرع المختار
-  const empsByBranch = filterBranch === "all"
-    ? employees
-    : employees.filter(e => e.branchId === filterBranch);
 
   const getEmpShift = (emp) => {
     if (!emp) return null;
@@ -3787,10 +3014,6 @@ function TabManualAttendance({ employees, records, setRecords, settings, shifts,
 
   const filteredRecs = records.filter(r => {
     if (filterEmp !== "all" && r.employeeId !== filterEmp) return false;
-    if (filterBranch !== "all") {
-      const emp = employees.find(e => e.id === r.employeeId);
-      if (!emp || emp.branchId !== filterBranch) return false;
-    }
     if (filterDate && r.date !== filterDate) return false;
     return true;
   }).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 100);
@@ -3929,21 +3152,14 @@ function TabManualAttendance({ employees, records, setRecords, settings, shifts,
         <div style={{ padding: "16px 20px", borderBottom: "1px solid #f1f5f9", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
           <h3 style={{ margin: 0, color: "#1e3a5f", fontSize: 15, fontWeight: "800" }}>🗂️ كل السجلات — تعديل وحذف</h3>
           <div style={{ display: "flex", gap: 8 }}>
-            {branches && branches.length > 0 && (
-              <select value={filterBranch} onChange={e => { setFilterBranch(e.target.value); setFilterEmp("all"); }}
-                style={{ padding: "7px 10px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 13, fontFamily: "Cairo, Arial", background: filterBranch !== "all" ? "#eff6ff" : "white", borderColor: filterBranch !== "all" ? "#2563a8" : "#e2e8f0" }}>
-                <option value="all">🏪 كل الفروع</option>
-                {branches.map(b => <option key={b.id} value={b.id}>🏪 {b.name}</option>)}
-              </select>
-            )}
             <select value={filterEmp} onChange={e => setFilterEmp(e.target.value)}
               style={{ padding: "7px 10px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 13, fontFamily: "Cairo, Arial" }}>
               <option value="all">كل الموظفين</option>
-              {empsByBranch.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+              {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
             </select>
             <input type="date" value={filterDate} onChange={e => setFilterDate(e.target.value)}
               style={{ padding: "7px 10px", border: "2px solid #e2e8f0", borderRadius: 8, fontSize: 13 }} />
-            <button onClick={() => { setFilterEmp("all"); setFilterDate(""); setFilterBranch("all"); }}
+            <button onClick={() => { setFilterEmp("all"); setFilterDate(""); }}
               style={{ padding: "7px 12px", background: "#f1f5f9", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: "Cairo, Arial", color: "#64748b", fontWeight: "700" }}>
               🔄 مسح
             </button>
@@ -3963,15 +3179,12 @@ function TabManualAttendance({ employees, records, setRecords, settings, shifts,
                 <tr><td colSpan={10} style={{ textAlign: "center", padding: 32, color: "#94a3b8" }}>لا توجد سجلات</td></tr>
               ) : filteredRecs.map((r, i) => {
                 const sc = statusColors[r.status] || { bg: "#f1f5f9", color: "#64748b" };
-                const recEmp = employees.find(e => e.id === r.employeeId);
-                const recBranch = recEmp && branches ? (branches || []).find(b => b.id === recEmp.branchId) : null;
                 return (
                   <tr key={r.id} style={{ background: i % 2 === 0 ? "#f8fafc" : "white" }}>
                     <td style={{ padding: "10px 12px", fontWeight: "700", color: "#1e293b", fontSize: 13 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         {r.addedByAdmin && <span title="أضافه المدير" style={{ fontSize: 10, background: "#dbeafe", color: "#2563a8", padding: "1px 5px", borderRadius: 4, fontWeight: "700" }}>يدوي</span>}
                         {r.editedByAdmin && <span title="عدّله المدير" style={{ fontSize: 10, background: "#fef9c3", color: "#854d0e", padding: "1px 5px", borderRadius: 4, fontWeight: "700" }}>معدّل</span>}
-                        {recBranch && <span style={{ fontSize: 10, background: "#f0fdf4", color: "#16a34a", padding: "1px 5px", borderRadius: 4, fontWeight: "700" }}>🏪 {recBranch.name}</span>}
                         {getEmpName(r.employeeId)}
                       </div>
                     </td>
@@ -4016,96 +3229,47 @@ function TabManualAttendance({ employees, records, setRecords, settings, shifts,
 // ══════════════════════════════════════════════
 function App() {
   const db = useDB();
-  const [user, setUser]               = useState(null);
-  const [adminBypass, setAdminBypass] = useState(false);
-  const { deviceId, status, approvedBranchId, deviceName, requestApproval } = useDeviceAuth();
+  const [user, setUser] = useState(null);
+  const [fbReady, setFbReady] = useState(!!window.__fsdb);
 
   useEffect(() => {
+    setFbReady(true);
+  }, []);
+
+  useEffect(() => {
+    // بيانات افتراضية لو الـ localStorage فاضي
     const hasEmps = localStorage.getItem(KEYS.employees);
     const hasRecs = localStorage.getItem(KEYS.records);
     if (!hasEmps) localStorage.setItem(KEYS.employees, JSON.stringify(DEFAULT_EMPLOYEES));
     if (!hasRecs) localStorage.setItem(KEYS.records, JSON.stringify(DEFAULT_RECORDS));
     if (!localStorage.getItem(KEYS.settings)) localStorage.setItem(KEYS.settings, JSON.stringify(DEFAULT_SETTINGS));
     if (!localStorage.getItem(KEYS.shifts)) localStorage.setItem(KEYS.shifts, JSON.stringify(DEFAULT_SHIFTS));
+
+    // لو أول مرة ارفع الـ defaults لـ Firestore
     if (!hasEmps) {
-      const upload = () => {
-        const fsdb = window.__fsdb;
-        if (!fsdb) { setTimeout(upload, 300); return; }
-        fsdb.collection("employees").get().then(snap => {
+      const uploadDefaults = () => {
+        const db = window.__fsdb;
+        if (!db) { setTimeout(uploadDefaults, 300); return; }
+        db.collection("employees").get().then(snap => {
           if (!snap.empty) return;
-          const batch = fsdb.batch();
-          DEFAULT_EMPLOYEES.forEach(e => batch.set(fsdb.collection("employees").doc(e.id), e));
-          DEFAULT_RECORDS.forEach(r => batch.set(fsdb.collection("records").doc(r.id), r));
-          DEFAULT_SHIFTS.forEach(s => batch.set(fsdb.collection("shifts").doc(s.id), s));
-          batch.set(fsdb.collection("settings").doc("main"), DEFAULT_SETTINGS);
-          batch.commit().catch(() => {});
-        }).catch(() => {});
+          const batch = db.batch();
+          DEFAULT_EMPLOYEES.forEach(e => batch.set(db.collection("employees").doc(e.id), e));
+          DEFAULT_RECORDS.forEach(r => batch.set(db.collection("records").doc(r.id), r));
+          DEFAULT_SHIFTS.forEach(s => batch.set(db.collection("shifts").doc(s.id), s));
+          batch.set(db.collection("settings").doc("main"), DEFAULT_SETTINGS);
+          batch.commit().catch(()=>{});
+        }).catch(()=>{});
       };
-      setTimeout(upload, 500);
+      setTimeout(uploadDefaults, 500);
     }
   }, []);
-
-  const branches = db.branches || [];
-
-  // الموظفين المرئيين — بس من فرع الجهاز المعتمد
-  const visibleEmployees = (approvedBranchId && branches.length > 0)
-    ? db.employees.filter(e => e.branchId === approvedBranchId)
-    : db.employees;
-
-  function handleLogin(u) { setUser(u); setAdminBypass(false); }
-  function handleLogout()  { setUser(null); setAdminBypass(false); }
-
-  // المدير دايماً يعدّي
-  // لو مفيش فروع → شتغل عادي
-  const noBranches = branches.length === 0;
-
-  // ما يعرضه للمستخدم لما مش logged in
-  function renderGate() {
-    // bypass المدير
-    if (adminBypass) {
-      return <LoginScreen onLogin={handleLogin} settings={db.settings} employees={visibleEmployees} branches={branches} deviceBranchId={approvedBranchId} adminOnly={true} />;
-    }
-    // مفيش فروع بعد → شاشة عادية
-    if (noBranches) {
-      return <LoginScreen onLogin={handleLogin} settings={db.settings} employees={db.employees} branches={[]} deviceBranchId={null} />;
-    }
-    // لسه بنتحقق من Firebase
-    if (status === "checking") {
-      return (
-        <div style={{ minHeight: "100vh", background: "linear-gradient(135deg,#0a1628,#1e3a5f)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "Cairo, Arial" }}>
-          <div style={{ textAlign: "center", color: "white" }}>
-            <div style={{ fontSize: 48, marginBottom: 16 }}>⚙️</div>
-            <div style={{ fontSize: 16, fontWeight: "700" }}>جاري التحقق من الجهاز...</div>
-          </div>
-        </div>
-      );
-    }
-    // جهاز جديد أو طلب معلق
-    if (status === "unknown" || status === "pending") {
-      return <DeviceRequestScreen branches={branches} status={status} deviceName={deviceName} onRequest={requestApproval} onAdminBypass={() => setAdminBypass(true)} />;
-    }
-    // جهاز مرفوض
-    if (status === "rejected") {
-      return (
-        <DeviceRejectedScreen
-          onRetry={() => { const fsdb = window.__fsdb; if (fsdb) fsdb.collection("devices").doc(deviceId).delete(); }}
-          onAdminBypass={() => setAdminBypass(true)}
-        />
-      );
-    }
-    // جهاز معتمد ✅
-    if (status === "approved") {
-      return <LoginScreen onLogin={handleLogin} settings={db.settings} employees={visibleEmployees} branches={branches} deviceBranchId={approvedBranchId} />;
-    }
-    return null;
-  }
 
   return (
     <>
       <SyncIndicator synced={db.synced} online={db.online} />
-      {user && user.role === "admin"    && <AdminDashboard    user={user} onLogout={handleLogout} db={db} />}
-      {user && user.role === "employee" && <EmployeeDashboard user={user} onLogout={handleLogout} db={db} />}
-      {!user && renderGate()}
+      {!user && <LoginScreen onLogin={setUser} settings={db.settings} employees={db.employees} />}
+      {user && user.role === "admin" && <AdminDashboard user={user} onLogout={() => setUser(null)} db={db} />}
+      {user && user.role === "employee" && <EmployeeDashboard user={user} onLogout={() => setUser(null)} db={db} />}
     </>
   );
 }
